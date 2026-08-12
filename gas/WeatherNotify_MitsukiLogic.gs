@@ -1,0 +1,99 @@
+/**
+ * みつきさん(前林中学校) 出発時刻リマインドロジック
+ * ------------------------------------------------------------
+ * ・その日の最初の【みつき】予定(部活・習い事等、カレンダーに時刻付きで登録されているもの)の
+ *   開始時刻から逆算して「家を出るべき時刻」を算出する。
+ * ・時刻付きの予定がその日に無い場合でも、登校日であれば通常授業の登校時刻
+ *   (MITSUKI_DEFAULT_SCHOOL_START、初期値は仮設定。要確認・調整)を基準に算出する。
+ * ・移動時間はGASのMapsサービスで自宅→目的地(予定のlocationが未設定なら学校)の徒歩時間を取得。
+ * ・雨天時(降水確率がしきい値以上)は移動バッファ+10分(初期値)を加算する。
+ * ------------------------------------------------------------
+ */
+
+// 通常授業日の標準登校時刻(初期値・仮。実際の時間割に合わせて要調整)
+const MITSUKI_DEFAULT_SCHOOL_START_PROP_ = 'MITSUKI_DEFAULT_SCHOOL_START';
+const MITSUKI_DEFAULT_SCHOOL_START_FALLBACK_ = '08:15';
+
+function getMitsukiDefaultSchoolStart_() {
+  return PropertiesService.getScriptProperties().getProperty(MITSUKI_DEFAULT_SCHOOL_START_PROP_) ||
+    MITSUKI_DEFAULT_SCHOOL_START_FALLBACK_;
+}
+
+// ==== 対象日がみつきさんの登校日かどうか判定(共通ロジックはConfig.gsのisSchoolDay_を使用) ====
+function isMitsukiSchoolDay_(date, calendarId) {
+  return isSchoolDay_(date, calendarId, '【みつき】');
+}
+
+// ==== 対象日の「基準となる予定」(最初の時刻付き【みつき】予定、無ければ通常登校)を取得 ====
+function getMitsukiTargetEvent_(targetDate, calendarId) {
+  const dateStr = Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyy-MM-dd');
+  const dayStart = new Date(dateStr + 'T00:00:00');
+  const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+
+  const calendar = CalendarApp.getCalendarById(calendarId);
+  const events = calendar.getEvents(dayStart, dayEnd);
+  const timedMitsukiEvents = events.filter(function (ev) {
+    return ev.getTitle().indexOf('【みつき】') === 0 && !ev.isAllDayEvent();
+  });
+  timedMitsukiEvents.sort(function (a, b) { return a.getStartTime() - b.getStartTime(); });
+
+  if (timedMitsukiEvents.length > 0) {
+    const ev = timedMitsukiEvents[0];
+    return {
+      label: ev.getTitle().replace('【みつき】', ''),
+      startTime: ev.getStartTime(),
+      destinationAddress: ev.getLocation() || WEATHER_LOCATIONS_.SCHOOL_MITSUKI.address,
+    };
+  }
+
+  if (isMitsukiSchoolDay_(targetDate, calendarId)) {
+    const startTime = new Date(dateStr + 'T' + getMitsukiDefaultSchoolStart_() + ':00');
+    return {
+      label: '登校(通常授業)',
+      startTime: startTime,
+      destinationAddress: WEATHER_LOCATIONS_.SCHOOL_MITSUKI.address,
+    };
+  }
+
+  return null; // その日はリマインド対象の予定なし
+}
+
+/**
+ * みつきさんの出発時刻リマインドを算出する(気象API・Mapsを実際に呼び出す)。
+ * @return {Object|null} { label, startTime, departureTime, travelMinutes, isRaining, pop } 対象予定が無い場合はnull
+ */
+function decideMitsukiReminder_(targetDate, calendarId) {
+  const target = getMitsukiTargetEvent_(targetDate, calendarId);
+  if (!target) return null;
+
+  const travelMinutes = getWalkingTravelMinutes_(WEATHER_LOCATIONS_.HOME.address, target.destinationAddress);
+
+  let pop = null;
+  try {
+    pop = getPrecipitationProbabilityAt_(target.startTime);
+  } catch (e) {
+    Logger.log('降水確率の取得でエラー(みつき): ' + e.message);
+  }
+
+  return calcMitsukiDeparture_(target.label, target.startTime, travelMinutes, pop, getWeatherConfig_());
+}
+
+/**
+ * 予定開始時刻・移動時間・降水確率から出発時刻を算出する純粋関数。
+ * ネットワークアクセスを行わないため、テストハーネスからモックデータで検証できる。
+ */
+function calcMitsukiDeparture_(label, startTime, travelMinutes, pop, config) {
+  const isRaining = pop !== null && pop >= config.popThreshold;
+  const bufferMin = isRaining ? config.mitsukiRainBufferMin : 0;
+  const departureTime = new Date(startTime.getTime() - (travelMinutes + bufferMin) * 60 * 1000);
+
+  return {
+    label: label,
+    startTime: startTime,
+    departureTime: departureTime,
+    travelMinutes: travelMinutes,
+    isRaining: isRaining,
+    bufferMin: bufferMin,
+    pop: pop,
+  };
+}
