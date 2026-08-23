@@ -2,13 +2,13 @@
  * 天気×カレンダー通知機能 - 気象データ・地点情報の取得
  * ------------------------------------------------------------
  * ・降水確率(PoP)  … 気象庁 天気予報JSON(認証不要)
- *     https://www.jma.go.jp/bin/forecast/data/forecast/230000.json (愛知県)
+ *     https://www.jma.go.jp/bosai/forecast/data/forecast/230000.json (愛知県)
  * ・降水ナウキャスト(強度・今後の雨雲) … Yahoo! YOLP気象情報API(要アプリケーションID、無料)
  *     https://map.yahooapis.jp/weather/V1/place
  * ------------------------------------------------------------
  */
 
-const JMA_FORECAST_URL_AICHI_ = 'https://www.jma.go.jp/bin/forecast/data/forecast/230000.json';
+const JMA_FORECAST_URL_AICHI_ = 'https://www.jma.go.jp/bosai/forecast/data/forecast/230000.json';
 const YOLP_WEATHER_URL_ = 'https://map.yahooapis.jp/weather/V1/place';
 
 // ==== 住所→緯度経度(初回のみジオコーディングし、スクリプトプロパティに永続キャッシュ) ====
