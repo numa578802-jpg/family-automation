@@ -26,7 +26,7 @@ const WEATHER_LOCATIONS_ = {
   SCHOOL_YUKI: { key: 'SCHOOL_YUKI', label: '刈谷高校', address: '愛知県刈谷市寿町5-101 愛知県立刈谷高等学校' },
   SCHOOL_MITSUKI: { key: 'SCHOOL_MITSUKI', label: '前林中学校', address: '愛知県豊田市前林町行田60 豊田市立前林中学校' },
   // 中継地点はゆうきさんの登校判定(バス/自転車)にのみ使用
-  STATION_WAKABAYASHI: { key: 'STATION_WAKABAYASHI', label: '名鉄若林駅', address: '愛知県刈谷市今岡町 名鉄三河線 若林駅' },
+  STATION_WAKABAYASHI: { key: 'STATION_WAKABAYASHI', label: '名鉄若林駅', address: '愛知県豊田市若林東町 名鉄三河線 若林駅' },
   STATION_CHIRYU: { key: 'STATION_CHIRYU', label: '知立駅', address: '愛知県知立市 知立駅' },
   STATION_KARIYASHI: { key: 'STATION_KARIYASHI', label: '刈谷市駅', address: '愛知県刈谷市 名鉄三河線 刈谷市駅' },
 };
