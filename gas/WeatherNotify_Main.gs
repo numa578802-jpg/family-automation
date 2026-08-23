@@ -82,9 +82,17 @@ function runWeatherNotification_(targetDate, isFinal) {
   }
 }
 
+// ==== 日付ラベル("M/d(月)"形式)の組み立て。GASプロジェクトのロケール設定に依存させず、常に日本語の曜日で出力する ====
+const WEEKDAY_LABELS_JA_ = ['日', '月', '火', '水', '木', '金', '土'];
+function formatDateLabelJa_(date) {
+  const monthDay = Utilities.formatDate(date, 'Asia/Tokyo', 'M/d');
+  const dowIndex = Number(Utilities.formatDate(date, 'Asia/Tokyo', 'u')) % 7; // 'u'は月=1〜日=7なので7(日)は%7で0に揃う
+  return monthDay + '(' + WEEKDAY_LABELS_JA_[dowIndex] + ')';
+}
+
 // ==== ゆうきさん向けメッセージ文面の組み立て ====
 function buildYukiMessage_(targetDate, result, isFinal) {
-  const dateLabel = Utilities.formatDate(targetDate, 'Asia/Tokyo', 'M/d(E)');
+  const dateLabel = formatDateLabelJa_(targetDate);
   const versionLabel = isFinal ? '確定版' : '暫定版';
   const lines = [];
   lines.push('【' + dateLabel + ' 登校 天気予報 - ' + versionLabel + '】');
@@ -100,7 +108,7 @@ function buildYukiMessage_(targetDate, result, isFinal) {
 
 // ==== みつきさん向けメッセージ文面の組み立て ====
 function buildMitsukiMessage_(targetDate, result, isFinal) {
-  const dateLabel = Utilities.formatDate(targetDate, 'Asia/Tokyo', 'M/d(E)');
+  const dateLabel = formatDateLabelJa_(targetDate);
   const versionLabel = isFinal ? '確定版' : '暫定版';
   const departureLabel = Utilities.formatDate(result.departureTime, 'Asia/Tokyo', 'H:mm');
   const startLabel = Utilities.formatDate(result.startTime, 'Asia/Tokyo', 'H:mm');
