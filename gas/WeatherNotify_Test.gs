@@ -110,3 +110,18 @@ function testFullRunDryRun() {
   Logger.log('=== 確定版(当日6:30想定)のテスト実行 ===');
   sendFinalNotification();
 }
+
+/**
+ * 「確定版」ロジック(ナウキャストによる雨雲判定を含む)を、実際の日付を待たずに検証するための関数。
+ * sendFinalNotification()は実行時点の「今日」を対象にする作りのため、まだ来ていない日を
+ * 確定版として試すには、この関数のように対象日を直接指定して呼び出す必要がある。
+ * 関数選択プルダウンからすぐ実行できるよう、「明日」を対象にした引数無しラッパーにしている。
+ * 別の日で試したい場合は、下のtargetDateの行を書き換えて実行してください
+ * (例: new Date('2026-08-25T00:00:00+09:00'))。
+ */
+function testFinalNotificationForTomorrow() {
+  const targetDate = new Date(new Date().getTime() + 24 * 60 * 60 * 1000); // ここを書き換えれば任意の日付で検証可能
+  Logger.log('=== 確定版ロジックを日付指定でテスト: ' +
+    Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyy-MM-dd') + ' ===');
+  runWeatherNotification_(targetDate, true);
+}
