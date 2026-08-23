@@ -1203,6 +1203,16 @@ function sendNotificationEmail_(config, fileName, registeredCount, checkReport, 
 
 // ==== ウェブアプリのエントリーポイント(通知メール内のボタンから呼ばれる) ====
 function doGet(e) {
+  // LINE Webhook用のURL(?webhook_token=...)にブラウザ等でGETアクセスした場合の診断用メッセージ。
+  // LINEからの実際のWebhook呼び出しはPOST(doPost)で行われるため、ここには来ない。
+  if (e.parameter && e.parameter.webhook_token) {
+    return HtmlService.createHtmlOutput(
+      '<p>このURLはLINE Webhook用のエンドポイントです。ブラウザでのGETアクセスでは何も起きません' +
+      '(LINEサーバーからのPOSTリクエストのみ処理されます)。<br>' +
+      '疎通確認は、LINE Developersコンソールの「Webhook URLを検証」ボタンから行ってください。</p>'
+    );
+  }
+
   const config = getConfig_();
   const action = e.parameter.action;
   const fileParam = e.parameter.file;
