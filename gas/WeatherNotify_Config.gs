@@ -13,10 +13,14 @@
  *   WEATHER_DRY_RUN                    … "true"ならLINE送信せずログ出力のみ(本番反映前のテスト用。デフォルトtrue)
  *   LINE_USER_ID_YUKI / LINE_USER_ID_MITSUKI
  *                                      … 友だち追加時にWebhookで自動登録されるが、手動で設定してもよい
+ *   LINE_USER_ID_KAZUSHI / LINE_USER_ID_KIKUMI
+ *                                      … 一志さん・きくみさんのuserId(CC受信用)。未取得の間は空欄のままでよく、
+ *                                        値を設定するだけで配信対象に加わる(コード変更不要)。
+ *                                        ゆうきさん向け・みつきさん向け、それぞれの通知が同一内容で2通届く。
  *   YUKI_POP_THRESHOLD                 … バス推奨とする降水確率(%)のしきい値(デフォルト50)
  *   YUKI_RAIN_INTENSITY_THRESHOLD_MMH  … バス推奨とする雨雲の降水強度しきい値(mm/h、デフォルト1)
  *   MITSUKI_RAIN_BUFFER_MIN            … 雨天時に追加する移動バッファ(分、デフォルト10)
- *   MITSUKI_DEFAULT_TRAVEL_MIN         … 徒歩移動時間が取得できない場合のフォールバック値(分、デフォルト15)
+ *   MITSUKI_DEFAULT_TRAVEL_MIN         … 自転車移動時間が取得できない場合のフォールバック値(分、デフォルト15)
  * ------------------------------------------------------------
  */
 
@@ -54,6 +58,8 @@ function getWeatherConfig_() {
     dryRun: (props.getProperty('WEATHER_DRY_RUN') || 'true') === 'true',
     lineUserIdYuki: props.getProperty('LINE_USER_ID_YUKI') || '',
     lineUserIdMitsuki: props.getProperty('LINE_USER_ID_MITSUKI') || '',
+    lineUserIdKazushi: props.getProperty('LINE_USER_ID_KAZUSHI') || '',
+    lineUserIdKikumi: props.getProperty('LINE_USER_ID_KIKUMI') || '',
     popThreshold: numOr(props.getProperty('YUKI_POP_THRESHOLD'), 50),
     rainIntensityThresholdMmh: numOr(props.getProperty('YUKI_RAIN_INTENSITY_THRESHOLD_MMH'), 1),
     mitsukiRainBufferMin: numOr(props.getProperty('MITSUKI_RAIN_BUFFER_MIN'), 10),

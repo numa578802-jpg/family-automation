@@ -65,17 +65,22 @@ function decideYukiTransportFromData_(pop, rainSpotDetails, config) {
     if (pop >= config.popThreshold) {
       busRecommended = true;
       reasons.push('降水確率' + pop + '%(しきい値' + config.popThreshold + '%以上)');
+    } else {
+      reasons.push('降水確率' + pop + '%(しきい値' + config.popThreshold + '%未満)');
     }
   } else {
     reasons.push('降水確率を取得できませんでした');
   }
 
-  const rainSpots = rainSpotDetails
-    .filter(function (spot) { return spot.mmh >= config.rainIntensityThresholdMmh; })
-    .map(function (spot) { return spot.label + '(' + spot.mmh + 'mm/h)'; });
-  if (rainSpots.length > 0) {
+  const overThresholdSpots = rainSpotDetails.filter(function (spot) { return spot.mmh >= config.rainIntensityThresholdMmh; });
+  if (overThresholdSpots.length > 0) {
     busRecommended = true;
+    const rainSpots = overThresholdSpots.map(function (spot) { return spot.label + '(' + spot.mmh + 'mm/h)'; });
     reasons.push('今後の雨雲通過予報: ' + rainSpots.join('、'));
+  } else if (rainSpotDetails.length > 0) {
+    // ナウキャストを実際に確認した(確定版)がしきい値以上の地点が無かった場合のみ明記する。
+    // rainSpotDetailsが空(暫定版で未確認、またはAPI取得失敗)の場合は「無し」と断定しない。
+    reasons.push('雨雲通過予報なし');
   }
 
   return {

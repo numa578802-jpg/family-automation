@@ -57,11 +57,12 @@ function runWeatherNotification_(targetDate, isFinal) {
   }
   const dateStr = Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyy-MM-dd');
 
-  // ゆうきさん(バス/自転車提案)
+  // ゆうきさん(バス/自転車提案) → ゆうき本人 + 一志さん・きくみさん(CC、内容確認用)
   try {
     if (isYukiSchoolDay_(targetDate, calendarId)) {
       const result = decideYukiTransport_(targetDate, isFinal);
-      sendLinePushMessage_(config.lineUserIdYuki, buildYukiMessage_(targetDate, result, isFinal));
+      const message = buildYukiMessage_(targetDate, result, isFinal);
+      sendLinePushToRecipients_([config.lineUserIdYuki, config.lineUserIdKazushi, config.lineUserIdKikumi], message);
     } else {
       Logger.log('ゆうきさん: ' + dateStr + ' は登校日ではないため通知をスキップしました。');
     }
@@ -69,11 +70,12 @@ function runWeatherNotification_(targetDate, isFinal) {
     Logger.log('ゆうきさんの通知処理でエラー: ' + e.message);
   }
 
-  // みつきさん(出発時刻リマインド)
+  // みつきさん(出発時刻リマインド) → みつき本人 + 一志さん・きくみさん(CC、内容確認用)
   try {
     const result = decideMitsukiReminder_(targetDate, calendarId);
     if (result) {
-      sendLinePushMessage_(config.lineUserIdMitsuki, buildMitsukiMessage_(targetDate, result, isFinal));
+      const message = buildMitsukiMessage_(targetDate, result, isFinal);
+      sendLinePushToRecipients_([config.lineUserIdMitsuki, config.lineUserIdKazushi, config.lineUserIdKikumi], message);
     } else {
       Logger.log('みつきさん: ' + dateStr + ' はリマインド対象の予定が無いため通知をスキップしました。');
     }
@@ -117,7 +119,7 @@ function buildMitsukiMessage_(targetDate, result, isFinal) {
   lines.push('【' + dateLabel + ' 出発時刻のお知らせ - ' + versionLabel + '】');
   lines.push('予定: ' + result.label + '(' + startLabel + '〜)');
   lines.push('家を出る目安: ' + departureLabel + '頃');
-  const detailParts = ['徒歩約' + result.travelMinutes + '分'];
+  const detailParts = ['自転車で約' + result.travelMinutes + '分'];
   if (result.isRaining) {
     detailParts.push('雨天バッファ+' + result.bufferMin + '分');
   }

@@ -50,6 +50,16 @@ function sendLinePushMessage_(userId, text) {
   }
 }
 
+// ==== 同一メッセージを複数の宛先へ送信する(本人+CC等)。空欄・重複userIdは自動的にスキップする ====
+function sendLinePushToRecipients_(userIds, text) {
+  const seen = {};
+  userIds.forEach(function (userId) {
+    if (!userId || seen[userId]) return;
+    seen[userId] = true;
+    sendLinePushMessage_(userId, text);
+  });
+}
+
 // ==== LINEへreplyメッセージを送信(Webhookのイベントに対する即時応答) ====
 function replyLineMessage_(replyToken, text) {
   const config = getWeatherConfig_();
@@ -98,33 +108,36 @@ function doPost(e) {
   return ContentService.createTextOutput('ok');
 }
 
+// ==== Webhookのテキスト登録で使う、キーワード→(スクリプトプロパティ・返信文言)の対応表 ====
+const LINE_REGISTRATION_KEYWORDS_ = {
+  'ゆうき': { prop: 'LINE_USER_ID_YUKI', replyText: 'ゆうきさんとして登録しました。今後、登校時のバス/自転車提案をお届けします。' },
+  'みつき': { prop: 'LINE_USER_ID_MITSUKI', replyText: 'みつきさんとして登録しました。今後、出発時刻のリマインドをお届けします。' },
+  '一志': { prop: 'LINE_USER_ID_KAZUSHI', replyText: '一志さんとして登録しました。今後、ゆうきさん・みつきさん向け通知のCCをお届けします。' },
+  'きくみ': { prop: 'LINE_USER_ID_KIKUMI', replyText: 'きくみさんとして登録しました。今後、ゆうきさん・みつきさん向け通知のCCをお届けします。' },
+};
+
 function handleLineWebhookEvent_(event, props) {
   const userId = event.source && event.source.userId;
 
   if (event.type === 'follow') {
     if (event.replyToken) {
       replyLineMessage_(event.replyToken,
-        'お友だち追加ありがとうございます。\n「ゆうき」または「みつき」とメッセージを送って、通知の登録をしてください。');
+        'お友だち追加ありがとうございます。\n「ゆうき」「みつき」「一志」「きくみ」のいずれかをメッセージで送って、通知の登録をしてください。');
     }
     return;
   }
 
   if (event.type === 'message' && event.message && event.message.type === 'text') {
     const text = event.message.text.trim();
-    if (text === 'ゆうき') {
-      props.setProperty('LINE_USER_ID_YUKI', userId);
-      Logger.log('LINE_USER_ID_YUKIを登録しました: ' + userId);
+    const target = LINE_REGISTRATION_KEYWORDS_[text];
+    if (target) {
+      props.setProperty(target.prop, userId);
+      Logger.log(target.prop + 'を登録しました: ' + userId);
       if (event.replyToken) {
-        replyLineMessage_(event.replyToken, 'ゆうきさんとして登録しました。今後、登校時のバス/自転車提案をお届けします。');
-      }
-    } else if (text === 'みつき') {
-      props.setProperty('LINE_USER_ID_MITSUKI', userId);
-      Logger.log('LINE_USER_ID_MITSUKIを登録しました: ' + userId);
-      if (event.replyToken) {
-        replyLineMessage_(event.replyToken, 'みつきさんとして登録しました。今後、出発時刻のリマインドをお届けします。');
+        replyLineMessage_(event.replyToken, target.replyText);
       }
     } else if (event.replyToken) {
-      replyLineMessage_(event.replyToken, '「ゆうき」または「みつき」と送信すると通知の登録ができます。');
+      replyLineMessage_(event.replyToken, '「ゆうき」「みつき」「一志」「きくみ」のいずれかを送信すると通知の登録ができます。');
     }
   }
 }

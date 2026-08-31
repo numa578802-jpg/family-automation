@@ -146,22 +146,22 @@ function getMaxForecastRainfallMmh_(locationKey) {
 }
 
 /**
- * 徒歩での移動時間(分)を取得。取得できない場合はMITSUKI_DEFAULT_TRAVEL_MINにフォールバックする。
+ * 自転車移動時間(分)を取得(みつきさんは自転車通学のため)。取得できない場合はMITSUKI_DEFAULT_TRAVEL_MINにフォールバックする。
  */
-function getWalkingTravelMinutes_(originAddress, destinationAddress) {
+function getBikingTravelMinutes_(originAddress, destinationAddress) {
   try {
     const directions = Maps.newDirectionFinder()
       .setOrigin(originAddress)
       .setDestination(destinationAddress)
-      .setMode(Maps.DirectionFinder.Mode.WALKING)
+      .setMode(Maps.DirectionFinder.Mode.BICYCLING)
       .getDirections();
     if (directions.status === 'OK' && directions.routes && directions.routes.length > 0) {
       const durationSec = directions.routes[0].legs[0].duration.value;
       return Math.ceil(durationSec / 60);
     }
-    Logger.log('徒歩移動時間の取得に失敗(status: ' + (directions && directions.status) + ')。デフォルト値を使用します。');
+    Logger.log('自転車移動時間の取得に失敗(status: ' + (directions && directions.status) + ')。デフォルト値を使用します。');
   } catch (e) {
-    Logger.log('徒歩移動時間の取得中にエラー: ' + e.message + ' デフォルト値を使用します。');
+    Logger.log('自転車移動時間の取得中にエラー: ' + e.message + ' デフォルト値を使用します。');
   }
   return getWeatherConfig_().mitsukiDefaultTravelMin;
 }

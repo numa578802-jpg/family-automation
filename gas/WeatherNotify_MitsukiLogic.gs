@@ -4,13 +4,14 @@
  * ・その日の最初の【みつき】予定(部活・習い事等、カレンダーに時刻付きで登録されているもの)の
  *   開始時刻から逆算して「家を出るべき時刻」を算出する。
  * ・時刻付きの予定がその日に無い場合でも、登校日であれば通常授業の登校時刻
- *   (MITSUKI_DEFAULT_SCHOOL_START、初期値は仮設定。要確認・調整)を基準に算出する。
- * ・移動時間はGASのMapsサービスで自宅→目的地(予定のlocationが未設定なら学校)の徒歩時間を取得。
+ *   (MITSUKI_DEFAULT_SCHOOL_START、確定値)を基準に算出する。
+ * ・移動時間はGASのMapsサービスで自宅→目的地(予定のlocationが未設定なら学校)の自転車移動時間を取得
+ *   (みつきさんは自転車通学のため)。
  * ・雨天時(降水確率がしきい値以上)は移動バッファ+10分(初期値)を加算する。
  * ------------------------------------------------------------
  */
 
-// 通常授業日の標準登校時刻(初期値・仮。実際の時間割に合わせて要調整)
+// 通常授業日の標準登校時刻(確定値)
 const MITSUKI_DEFAULT_SCHOOL_START_PROP_ = 'MITSUKI_DEFAULT_SCHOOL_START';
 const MITSUKI_DEFAULT_SCHOOL_START_FALLBACK_ = '08:15';
 
@@ -66,7 +67,7 @@ function decideMitsukiReminder_(targetDate, calendarId) {
   const target = getMitsukiTargetEvent_(targetDate, calendarId);
   if (!target) return null;
 
-  const travelMinutes = getWalkingTravelMinutes_(WEATHER_LOCATIONS_.HOME.address, target.destinationAddress);
+  const travelMinutes = getBikingTravelMinutes_(WEATHER_LOCATIONS_.HOME.address, target.destinationAddress);
 
   let pop = null;
   try {

@@ -47,8 +47,8 @@ function testMitsukiLogicCases() {
   const startTime = new Date('2026-08-13T09:00:00+09:00');
 
   const cases = [
-    { name: '晴れ・徒歩25分→バッファ無し', travelMinutes: 25, pop: 20, expectDeparture: '2026-08-13T08:35:00+09:00' },
-    { name: '雨天・徒歩25分→+10分バッファ', travelMinutes: 25, pop: 80, expectDeparture: '2026-08-13T08:25:00+09:00' },
+    { name: '晴れ・自転車25分→バッファ無し', travelMinutes: 25, pop: 20, expectDeparture: '2026-08-13T08:35:00+09:00' },
+    { name: '雨天・自転車25分→+10分バッファ', travelMinutes: 25, pop: 80, expectDeparture: '2026-08-13T08:25:00+09:00' },
     { name: 'PoP境界値50%→雨天扱い', travelMinutes: 20, pop: 50, expectDeparture: '2026-08-13T08:30:00+09:00' },
   ];
 
@@ -96,9 +96,9 @@ function testWeatherApiSmoke() {
   const mmh = getMaxForecastRainfallMmh_('HOME');
   Logger.log('自宅の降水強度予測最大値: ' + mmh + ' mm/h');
 
-  Logger.log('=== 徒歩移動時間(自宅→前林中学校)確認 ===');
-  const minutes = getWalkingTravelMinutes_(WEATHER_LOCATIONS_.HOME.address, WEATHER_LOCATIONS_.SCHOOL_MITSUKI.address);
-  Logger.log('徒歩移動時間: ' + minutes + '分');
+  Logger.log('=== 自転車移動時間(自宅→前林中学校)確認 ===');
+  const minutes = getBikingTravelMinutes_(WEATHER_LOCATIONS_.HOME.address, WEATHER_LOCATIONS_.SCHOOL_MITSUKI.address);
+  Logger.log('自転車移動時間: ' + minutes + '分');
 }
 
 // ==== 本番と同じ処理を1回流す(WEATHER_DRY_RUN=trueならLINE送信されずログのみ) ====
