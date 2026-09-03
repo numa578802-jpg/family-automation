@@ -156,6 +156,20 @@ function testWeatherApiSmoke() {
   Logger.log('自転車移動時間: ' + minutes + '分');
 }
 
+// ==== 登校日判定(isSchoolDay_)の診断ログ付き実行(要実カレンダー) ====
+// 「登校日のはずなのに登校日と判定されない」等の調査用。どの条件で除外されたか、
+// 休み系キーワードに一致した予定があればそのタイトルまでログに出す。
+function testSchoolDayDiagnostic() {
+  const calendarId = getConfig_().calendarId;
+  const tomorrow = new Date(new Date().getTime() + 24 * 60 * 60 * 1000);
+
+  ['【ゆうき】', '【みつき】'].forEach(function (namePrefix) {
+    const result = isSchoolDay_(tomorrow, calendarId, namePrefix, true);
+    Logger.log(namePrefix + ' 最終判定: ' + (result ? '登校日' : '登校日ではない'));
+    Logger.log('---');
+  });
+}
+
 // ==== 下校時刻算出ロジック(項目2)の疎通確認(要実カレンダー) ====
 function testHomewardDepartureSmoke() {
   const calendarId = getConfig_().calendarId;

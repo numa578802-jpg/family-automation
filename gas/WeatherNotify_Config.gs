@@ -84,31 +84,54 @@ const NON_SCHOOL_DAY_KEYWORDS_ = [
 
 // ==== 対象日が指定した家族(namePrefix: '【ゆうき】' or '【みつき】')の登校日か判定 ====
 // 平日 かつ 国民の祝日でない かつ カレンダー上に長期休み等を示す終日予定が無いこと、を条件とする。
-function isSchoolDay_(date, calendarId, namePrefix) {
-  const dow = date.getDay();
-  if (dow === 0 || dow === 6) return false; // 土日
-
+// verbose=trueを渡すと、どの条件で除外されたか(該当した場合はイベントのタイトルも)をログに出す診断モード。
+function isSchoolDay_(date, calendarId, namePrefix, verbose) {
   const dateStr = Utilities.formatDate(date, 'Asia/Tokyo', 'yyyy-MM-dd');
+  const dow = date.getDay();
+  if (verbose) {
+    Logger.log('[isSchoolDay_診断] ' + namePrefix + ' 対象日=' + dateStr + ' dow=' + dow + '(0=日〜6=土) ISO=' + date.toISOString());
+  }
+  if (dow === 0 || dow === 6) {
+    if (verbose) Logger.log('[isSchoolDay_診断] → 土日のため登校日ではないと判定');
+    return false; // 土日
+  }
+
   const holidayMap = buildHolidayNameMap_(); // 既存スクリプト(家族スケジュール自動登録.gs)の関数を再利用
-  if (holidayMap[dateStr]) return false; // 国民の祝日
+  if (holidayMap[dateStr]) {
+    if (verbose) Logger.log('[isSchoolDay_診断] → 国民の祝日(' + holidayMap[dateStr] + ')のため登校日ではないと判定');
+    return false; // 国民の祝日
+  }
 
   try {
     const calendar = CalendarApp.getCalendarById(calendarId);
     const dayStart = new Date(dateStr + 'T00:00:00');
     const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
     const events = calendar.getEvents(dayStart, dayEnd);
-    const hasNonSchoolDayEvent = events.some(function (ev) {
+    if (verbose) {
+      Logger.log('[isSchoolDay_診断] 検索範囲: ' + dayStart.toISOString() + ' 〜 ' + dayEnd.toISOString() +
+        ' / ' + namePrefix + 'に一致する予定: ' +
+        events.filter(function (ev) { return ev.getTitle().indexOf(namePrefix) === 0; })
+          .map(function (ev) {
+            return '"' + ev.getTitle() + '"(終日:' + ev.isAllDayEvent() +
+              ', 開始:' + ev.getStartTime().toISOString() + ', 終了:' + ev.getEndTime().toISOString() + ')';
+          }).join(' / ') || '(該当する予定なし)');
+    }
+    const matchedEvent = events.find(function (ev) {
       const title = ev.getTitle();
       if (title.indexOf(namePrefix) !== 0) return false;
       return NON_SCHOOL_DAY_KEYWORDS_.some(function (kw) {
         return title.indexOf(kw) !== -1;
       });
     });
-    if (hasNonSchoolDayEvent) return false;
+    if (matchedEvent) {
+      if (verbose) Logger.log('[isSchoolDay_診断] → 休み系キーワードに一致する予定「' + matchedEvent.getTitle() + '」があるため登校日ではないと判定');
+      return false;
+    }
   } catch (e) {
     Logger.log('登校日判定中のカレンダー確認でエラー(判定は続行): ' + e.message);
   }
 
+  if (verbose) Logger.log('[isSchoolDay_診断] → 除外条件に該当せず、登校日と判定');
   return true;
 }
 
