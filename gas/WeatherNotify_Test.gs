@@ -156,31 +156,40 @@ function testWeatherApiSmoke() {
   Logger.log('自転車移動時間: ' + minutes + '分');
 }
 
-// ==== 登校日判定(isSchoolDay_)の診断ログ付き実行(要実カレンダー) ====
-// 「登校日のはずなのに登校日と判定されない」等の調査用。どの条件で除外されたか、
-// 休み系キーワードに一致した予定があればそのタイトルまでログに出す。
+/**
+ * 登校日判定(isSchoolDay_)の診断ログ付き実行(要実カレンダー)。
+ * 「登校日のはずなのに登校日と判定されない」等の調査用。どの条件で除外されたか、
+ * 休み系キーワードに一致した予定があればそのタイトルまでログに出す。
+ * 「明日」など相対日付だと実行時刻(特に深夜)によって対象日がずれるため、
+ * targetDateの行を直接書き換えて、確認したい日付を指定してください。
+ */
 function testSchoolDayDiagnostic() {
+  const targetDate = new Date('2026-09-04T00:00:00+09:00'); // ここを書き換えれば任意の日付で確認可能
   const calendarId = getConfig_().calendarId;
-  const tomorrow = new Date(new Date().getTime() + 24 * 60 * 60 * 1000);
 
   ['【ゆうき】', '【みつき】'].forEach(function (namePrefix) {
-    const result = isSchoolDay_(tomorrow, calendarId, namePrefix, true);
+    const result = isSchoolDay_(targetDate, calendarId, namePrefix, true);
     Logger.log(namePrefix + ' 最終判定: ' + (result ? '登校日' : '登校日ではない'));
     Logger.log('---');
   });
 }
 
-// ==== 下校時刻算出ロジック(項目2)の疎通確認(要実カレンダー) ====
+/**
+ * 下校時刻算出ロジック(項目2)の疎通確認(要実カレンダー)。
+ * 「明日」など相対日付だと実行時刻(特に深夜)によって対象日がずれるため、
+ * targetDateの行を直接書き換えて、確認したい日付を指定してください。
+ */
 function testHomewardDepartureSmoke() {
+  const targetDate = new Date('2026-09-04T00:00:00+09:00'); // ここを書き換えれば任意の日付で確認可能
   const calendarId = getConfig_().calendarId;
-  const tomorrow = new Date(new Date().getTime() + 24 * 60 * 60 * 1000);
+  Logger.log('=== 対象日: ' + Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyy-MM-dd') + ' ===');
 
   ['ゆうき', 'みつき'].forEach(function (name) {
     const namePrefix = '【' + name + '】';
     const defaultEnd = name === 'ゆうき' ? getYukiDefaultSchoolEnd_() : getMitsukiDefaultSchoolEnd_();
-    const result = getHomewardDepartureTime_(tomorrow, calendarId, namePrefix, defaultEnd);
+    const result = getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultEnd);
     if (!result) {
-      Logger.log(name + ': 明日は下校予定なし(登校日でもなく、時刻付きの予定も無い)');
+      Logger.log(name + ': 対象日は下校予定なし(登校日でもなく、時刻付きの予定も無い)');
     } else {
       Logger.log(name + ': 下校予定 ' + Utilities.formatDate(result.time, 'Asia/Tokyo', 'H:mm') +
         '頃(' + result.source + (result.label ? ' / ' + result.label : '') + ')');
