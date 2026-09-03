@@ -3,7 +3,7 @@
  * ------------------------------------------------------------
  * 本番反映(確認ポイント③)の前に、GASエディタから手動実行して動作確認するための関数群です。
  *
- * ・testYukiLogicCases() / testMitsukiLogicCases()
+ * ・testYukiLogicCases() / testMitsukiLogicCases() / testMitsukiEscortLogicCases()
  *     気象API・カレンダーに依存しない、固定データによるロジック単体テスト。
  *     いつでもすぐに実行でき、判定式(しきい値まわり)の確認に使う。
  * ・testWeatherApiSmoke()
@@ -11,10 +11,12 @@
  * ・testFullRunDryRun()
  *     実際のカレンダー・気象データを使って本番と同じ処理を1回流す。
  *     WEATHER_DRY_RUN=true(デフォルト)であればLINE送信は行われず、ログに出力されるだけなので安全。
+ * ・testFinalNotificationForTomorrow()
+ *     「確定版」ロジック(下校時アラートの予約を含む)を、明日を対象日として即座に検証する。
  * ------------------------------------------------------------
  */
 
-// ==== ゆうきさんロジックの単体テスト(固定データ、ネットワークアクセス無し) ====
+// ==== ゆうきさんロジックの単体テスト(固定データ、ネットワークアクセス無し。朝の判定のみ) ====
 function testYukiLogicCases() {
   const config = { popThreshold: 50, rainIntensityThresholdMmh: 1 };
   const cases = [
@@ -33,15 +35,29 @@ function testYukiLogicCases() {
     if (pass) okCount++;
     Logger.log((pass ? '[OK] ' : '[NG] ') + c.name + ' => ' + result.mode + ' / 理由: ' + result.reasons.join(' / '));
   });
-  Logger.log('ゆうきさんロジックテスト: ' + okCount + '/' + cases.length + ' 件成功');
+  Logger.log('ゆうきさんロジックテスト(朝のみ): ' + okCount + '/' + cases.length + ' 件成功');
 
-  // メッセージ文面のサンプルも出力しておく
-  const sample = decideYukiTransportFromData_(60, [{ label: '刈谷市駅', mmh: 2 }], config);
-  Logger.log('--- メッセージサンプル(暫定版) ---\n' + buildYukiMessage_(new Date(), sample, false));
-  Logger.log('--- メッセージサンプル(確定版) ---\n' + buildYukiMessage_(new Date(), sample, true));
+  // 朝・帰り往復判定を含むメッセージ文面のサンプル(decideYukiTransport_と同じ形のダミーデータで検証)
+  function fakeYukiResult(morningRainy, afternoonRainy) {
+    const morning = evaluateRainCondition_(morningRainy ? 60 : 20, [], config);
+    const afternoon = evaluateRainCondition_(afternoonRainy ? 60 : 20, [], config);
+    return {
+      mode: (morning.rainy || afternoon.rainy) ? 'バス' : '自転車',
+      morning: morning,
+      afternoon: afternoon,
+      homewardTime: new Date('2026-08-13T16:00:00+09:00'),
+      homewardLabel: '通常下校',
+    };
+  }
+  Logger.log('--- メッセージサンプル(朝晴れ・帰り晴れ→自転車) ---\n' +
+    buildYukiMessage_(new Date('2026-08-13T00:00:00+09:00'), fakeYukiResult(false, false), true));
+  Logger.log('--- メッセージサンプル(朝雨→バス) ---\n' +
+    buildYukiMessage_(new Date('2026-08-13T00:00:00+09:00'), fakeYukiResult(true, false), true));
+  Logger.log('--- メッセージサンプル(朝は良好・帰りだけ雨→往復バス、修正1の確認) ---\n' +
+    buildYukiMessage_(new Date('2026-08-13T00:00:00+09:00'), fakeYukiResult(false, true), true));
 }
 
-// ==== みつきさんロジックの単体テスト(固定データ、ネットワークアクセス無し) ====
+// ==== みつきさんロジックの単体テスト(出発時刻のお知らせ。固定データ、ネットワークアクセス無し) ====
 function testMitsukiLogicCases() {
   const config = { popThreshold: 50, mitsukiRainBufferMin: 10 };
   const startTime = new Date('2026-08-13T09:00:00+09:00');
@@ -67,6 +83,45 @@ function testMitsukiLogicCases() {
   const sample = calcMitsukiDeparture_('卓球部練習', startTime, 25, 80, config);
   Logger.log('--- メッセージサンプル(暫定版) ---\n' + buildMitsukiMessage_(startTime, sample, false));
   Logger.log('--- メッセージサンプル(確定版) ---\n' + buildMitsukiMessage_(startTime, sample, true));
+}
+
+// ==== みつきさんの送迎提案(項目4・新規)の単体テスト(固定データ、ネットワークアクセス無し) ====
+function testMitsukiEscortLogicCases() {
+  const config = { popThreshold: 50, rainIntensityThresholdMmh: 1 };
+  const goTime = new Date('2026-08-13T16:00:00+09:00');
+  const returnTime = new Date('2026-08-13T18:00:00+09:00');
+
+  function fakeEscortResult(goPop, returnPop) {
+    const go = evaluateRainCondition_(goPop, [], config);
+    const ret = evaluateRainCondition_(returnPop, [], config);
+    return {
+      label: '卓球部',
+      mode: (go.rainy || ret.rainy) ? '送迎' : '徒歩',
+      goTime: goTime,
+      returnTime: returnTime,
+      go: go,
+      ret: ret,
+    };
+  }
+
+  const cases = [
+    { name: '行き・帰りとも晴れ→徒歩', goPop: 20, returnPop: 20, expectMode: '徒歩' },
+    { name: '行きだけ雨→送迎', goPop: 60, returnPop: 20, expectMode: '送迎' },
+    { name: '帰りだけ雨→送迎', goPop: 20, returnPop: 60, expectMode: '送迎' },
+  ];
+  let okCount = 0;
+  cases.forEach(function (c) {
+    const r = fakeEscortResult(c.goPop, c.returnPop);
+    const pass = r.mode === c.expectMode;
+    if (pass) okCount++;
+    Logger.log((pass ? '[OK] ' : '[NG] ') + c.name + ' => ' + r.mode);
+  });
+  Logger.log('みつき送迎提案ロジックテスト: ' + okCount + '/' + cases.length + ' 件成功');
+
+  Logger.log('--- メッセージサンプル(徒歩) ---\n' +
+    buildMitsukiEscortMessage_(new Date('2026-08-13T00:00:00+09:00'), fakeEscortResult(20, 20), true));
+  Logger.log('--- メッセージサンプル(送迎) ---\n' +
+    buildMitsukiEscortMessage_(new Date('2026-08-13T00:00:00+09:00'), fakeEscortResult(60, 20), true));
 }
 
 // ==== 実際の外部API疎通確認(要YAHOO_APP_ID/ネットワーク) ====
@@ -101,6 +156,24 @@ function testWeatherApiSmoke() {
   Logger.log('自転車移動時間: ' + minutes + '分');
 }
 
+// ==== 下校時刻算出ロジック(項目2)の疎通確認(要実カレンダー) ====
+function testHomewardDepartureSmoke() {
+  const calendarId = getConfig_().calendarId;
+  const tomorrow = new Date(new Date().getTime() + 24 * 60 * 60 * 1000);
+
+  ['ゆうき', 'みつき'].forEach(function (name) {
+    const namePrefix = '【' + name + '】';
+    const defaultEnd = name === 'ゆうき' ? getYukiDefaultSchoolEnd_() : getMitsukiDefaultSchoolEnd_();
+    const result = getHomewardDepartureTime_(tomorrow, calendarId, namePrefix, defaultEnd);
+    if (!result) {
+      Logger.log(name + ': 明日は下校予定なし(登校日でもなく、時刻付きの予定も無い)');
+    } else {
+      Logger.log(name + ': 下校予定 ' + Utilities.formatDate(result.time, 'Asia/Tokyo', 'H:mm') +
+        '頃(' + result.source + (result.label ? ' / ' + result.label : '') + ')');
+    }
+  });
+}
+
 // ==== 本番と同じ処理を1回流す(WEATHER_DRY_RUN=trueならLINE送信されずログのみ) ====
 function testFullRunDryRun() {
   const config = getWeatherConfig_();
@@ -112,12 +185,15 @@ function testFullRunDryRun() {
 }
 
 /**
- * 「確定版」ロジック(ナウキャストによる雨雲判定を含む)を、実際の日付を待たずに検証するための関数。
- * sendFinalNotification()は実行時点の「今日」を対象にする作りのため、まだ来ていない日を
- * 確定版として試すには、この関数のように対象日を直接指定して呼び出す必要がある。
+ * 「確定版」ロジック(ナウキャストによる雨雲判定・下校時アラートの予約を含む)を、
+ * 実際の日付を待たずに検証するための関数。
+ * sendFinalNotification()は実行時点の「今日」しか対象にできないため、
+ * まだ来ていない日を確定版として試すには、この関数のように対象日を直接指定して呼び出す必要がある。
  * 関数選択プルダウンからすぐ実行できるよう、「明日」を対象にした引数無しラッパーにしている。
  * 別の日で試したい場合は、下のtargetDateの行を書き換えて実行してください
  * (例: new Date('2026-08-25T00:00:00+09:00'))。
+ * ※下校時アラートは、対象日の下校予定時刻の30分前(初期値)に実際に使い捨てトリガーが発火して送信される。
+ *   「明日」を対象にすると通常は下校予定時刻が翌日になるため、このテスト実行では即座には届かない。
  */
 function testFinalNotificationForTomorrow() {
   const targetDate = new Date(new Date().getTime() + 24 * 60 * 60 * 1000); // ここを書き換えれば任意の日付で検証可能

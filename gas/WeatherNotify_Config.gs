@@ -21,8 +21,15 @@
  *   YUKI_RAIN_INTENSITY_THRESHOLD_MMH  … バス推奨とする雨雲の降水強度しきい値(mm/h、デフォルト1)
  *   MITSUKI_RAIN_BUFFER_MIN            … 雨天時に追加する移動バッファ(分、デフォルト10)
  *   MITSUKI_DEFAULT_TRAVEL_MIN         … 自転車移動時間が取得できない場合のフォールバック値(分、デフォルト15)
+ *   YUKI_DEFAULT_SCHOOL_END            … ゆうきさんの通常下校時刻(デフォルト16:00、仮値。要確認)
+ *   MITSUKI_DEFAULT_SCHOOL_END         … みつきさんの通常下校時刻(デフォルト16:00、仮値。要確認)
+ *   HOMEWARD_ALERT_LEAD_MIN            … 「下校時 雨雲通過予報」を下校予定時刻の何分前に送るか(デフォルト30)
  * ------------------------------------------------------------
  */
+
+// ==== 天気情報の出典URL(全メッセージ共通。判定に実際に使ったデータ種別に応じて付記する) ====
+const WEATHER_SOURCE_URL_POP_ = 'https://www.jma.go.jp/bosai/forecast/#area_type=offices&area_code=230000';
+const WEATHER_SOURCE_URL_NOWCAST_ = 'https://weather.yahoo.co.jp/weather/zoomradar/';
 
 // ==== 地点情報(住所ベース。実行時にジオコーディングして緯度経度に変換しキャッシュする) ====
 const WEATHER_LOCATIONS_ = {
@@ -64,6 +71,7 @@ function getWeatherConfig_() {
     rainIntensityThresholdMmh: numOr(props.getProperty('YUKI_RAIN_INTENSITY_THRESHOLD_MMH'), 1),
     mitsukiRainBufferMin: numOr(props.getProperty('MITSUKI_RAIN_BUFFER_MIN'), 10),
     mitsukiDefaultTravelMin: numOr(props.getProperty('MITSUKI_DEFAULT_TRAVEL_MIN'), 15),
+    homewardAlertLeadMin: numOr(props.getProperty('HOMEWARD_ALERT_LEAD_MIN'), 30),
   };
 }
 
@@ -102,4 +110,100 @@ function isSchoolDay_(date, calendarId, namePrefix) {
   }
 
   return true;
+}
+
+/**
+ * 降水確率・雨雲通過予報(地点ごとの降水強度)から「雨天と判断すべきか」を判定する共通の純粋関数。
+ * ゆうきさんのバス/自転車判定・みつきさんの送迎判定など、複数の判定で共用する
+ * (ネットワークアクセスを行わないため、テストハーネスからモックデータで検証できる)。
+ * @param {number|null} pop 降水確率(%)。取得できなかった場合はnull
+ * @param {Array<{label:string, mmh:number}>} rainSpotDetails 地点ごとの降水強度予測(mm/h)。
+ *   ナウキャストを確認していない場合は空配列を渡す(「雨雲なし」と断定しないため)。
+ * @param {Object} config getWeatherConfig_()の戻り値(popThreshold, rainIntensityThresholdMmhを使用)
+ * @return {Object} { rainy: boolean, reasons: string[], pop: number|null, usedPop: boolean, usedNowcast: boolean }
+ */
+function evaluateRainCondition_(pop, rainSpotDetails, config) {
+  const reasons = [];
+  let rainy = false;
+
+  if (pop !== null) {
+    if (pop >= config.popThreshold) {
+      rainy = true;
+      reasons.push('降水確率' + pop + '%(しきい値' + config.popThreshold + '%以上)');
+    } else {
+      reasons.push('降水確率' + pop + '%(しきい値' + config.popThreshold + '%未満)');
+    }
+  } else {
+    reasons.push('降水確率を取得できませんでした');
+  }
+
+  const overThresholdSpots = rainSpotDetails.filter(function (spot) { return spot.mmh >= config.rainIntensityThresholdMmh; });
+  if (overThresholdSpots.length > 0) {
+    rainy = true;
+    const rainSpots = overThresholdSpots.map(function (spot) { return spot.label + '(' + spot.mmh + 'mm/h)'; });
+    reasons.push('今後の雨雲通過予報: ' + rainSpots.join('、'));
+  } else if (rainSpotDetails.length > 0) {
+    // ナウキャストを実際に確認した(=rainSpotDetailsが空でない)がしきい値以上の地点が無かった場合のみ明記する。
+    reasons.push('雨雲通過予報なし');
+  }
+
+  return {
+    rainy: rainy,
+    reasons: reasons,
+    pop: pop,
+    usedPop: pop !== null,
+    usedNowcast: rainSpotDetails.length > 0,
+  };
+}
+
+/**
+ * 対象日の「学校(または活動場所)から家に向かって出発する時刻」を、ゆうき・みつき共通で算出する。
+ * ルール:
+ *   1. 対象日に時刻付きの【namePrefix】予定(部活動・習い事等)があれば、最も遅く終わる予定の終了時刻を候補にする。
+ *   2. 対象日が登校日であれば、defaultTimeStr(通常の下校時刻)も候補にする。
+ *   3. 候補が複数ある場合は、より遅い時刻(＝より現実的に家へ向かう時刻)を採用する。
+ *   4. 候補が1つも無い場合(登校日でもなく、予定も無い)はnullを返す。
+ * @param {Date} targetDate 対象日
+ * @param {string} calendarId 家族共有カレンダーのID
+ * @param {string} namePrefix '【ゆうき】' または '【みつき】'
+ * @param {string} defaultTimeStr 通常下校時刻(例: '16:00')
+ * @return {{time: Date, source: 'calendar'|'default', label: string}|null}
+ */
+function getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultTimeStr) {
+  const dateStr = Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyy-MM-dd');
+  const dayStart = new Date(dateStr + 'T00:00:00');
+  const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+
+  let latestEventEnd = null;
+  let latestEventLabel = null;
+  try {
+    const calendar = CalendarApp.getCalendarById(calendarId);
+    const events = calendar.getEvents(dayStart, dayEnd);
+    events.forEach(function (ev) {
+      if (ev.getTitle().indexOf(namePrefix) !== 0 || ev.isAllDayEvent()) return;
+      const end = ev.getEndTime();
+      if (!latestEventEnd || end > latestEventEnd) {
+        latestEventEnd = end;
+        latestEventLabel = ev.getTitle().replace(namePrefix, '');
+      }
+    });
+  } catch (e) {
+    Logger.log('下校時刻算出中のカレンダー確認でエラー: ' + e.message);
+  }
+
+  const isSchool = isSchoolDay_(targetDate, calendarId, namePrefix);
+  const defaultTime = isSchool ? new Date(dateStr + 'T' + defaultTimeStr + ':00') : null;
+
+  if (latestEventEnd && defaultTime) {
+    return latestEventEnd.getTime() >= defaultTime.getTime()
+      ? { time: latestEventEnd, source: 'calendar', label: latestEventLabel }
+      : { time: defaultTime, source: 'default', label: '通常下校' };
+  }
+  if (latestEventEnd) {
+    return { time: latestEventEnd, source: 'calendar', label: latestEventLabel };
+  }
+  if (defaultTime) {
+    return { time: defaultTime, source: 'default', label: '通常下校' };
+  }
+  return null; // 登校日でもなく、時刻付きの予定も無い日
 }

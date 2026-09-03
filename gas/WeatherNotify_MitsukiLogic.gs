@@ -20,6 +20,15 @@ function getMitsukiDefaultSchoolStart_() {
     MITSUKI_DEFAULT_SCHOOL_START_FALLBACK_;
 }
 
+// 通常下校時刻(要確認・調整。実際の下校時刻に合わせて後で修正してください)
+const MITSUKI_DEFAULT_SCHOOL_END_PROP_ = 'MITSUKI_DEFAULT_SCHOOL_END';
+const MITSUKI_DEFAULT_SCHOOL_END_FALLBACK_ = '16:00';
+
+function getMitsukiDefaultSchoolEnd_() {
+  return PropertiesService.getScriptProperties().getProperty(MITSUKI_DEFAULT_SCHOOL_END_PROP_) ||
+    MITSUKI_DEFAULT_SCHOOL_END_FALLBACK_;
+}
+
 // ==== 対象日がみつきさんの登校日かどうか判定(共通ロジックはConfig.gsのisSchoolDay_を使用) ====
 function isMitsukiSchoolDay_(date, calendarId) {
   return isSchoolDay_(date, calendarId, '【みつき】');
@@ -96,5 +105,66 @@ function calcMitsukiDeparture_(label, startTime, travelMinutes, pop, config) {
     isRaining: isRaining,
     bufferMin: bufferMin,
     pop: pop,
+    usedPop: pop !== null,
+  };
+}
+
+// ==== 対象の予定が「部活動」または「お茶」に該当するか(送迎提案の対象判定用) ====
+function isMitsukiActivityRelevant_(title) {
+  return title.indexOf('部') !== -1 || title.indexOf('お茶') !== -1;
+}
+
+/**
+ * みつきさんの部活動/お茶の日に、行き・帰りの雨天状況から「徒歩」「送迎」を提案する(新規機能)。
+ * 対象日に部活動/お茶の時刻付き予定が無ければnullを返す(その日は送迎提案の対象外)。
+ * 行き・帰りとも、時間的に離れていることが多いため降水確率のみで判定する(ナウキャストは使わない)。
+ * @return {Object|null} { label, mode: '徒歩'|'送迎', goTime, returnTime, go: {...}, ret: {...} }
+ */
+function decideMitsukiEscort_(targetDate, calendarId) {
+  const config = getWeatherConfig_();
+  const dateStr = Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyy-MM-dd');
+  const dayStart = new Date(dateStr + 'T00:00:00');
+  const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+
+  const calendar = CalendarApp.getCalendarById(calendarId);
+  const events = calendar.getEvents(dayStart, dayEnd);
+  const relevantEvents = events.filter(function (ev) {
+    return ev.getTitle().indexOf('【みつき】') === 0 && !ev.isAllDayEvent() && isMitsukiActivityRelevant_(ev.getTitle());
+  });
+  if (relevantEvents.length === 0) return null; // 部活動/お茶の予定が無い日は対象外
+
+  relevantEvents.sort(function (a, b) { return a.getStartTime() - b.getStartTime(); });
+  const target = relevantEvents[0];
+  const label = target.getTitle().replace('【みつき】', '');
+  const goTime = target.getStartTime();
+
+  const homeward = getHomewardDepartureTime_(targetDate, calendarId, '【みつき】', getMitsukiDefaultSchoolEnd_());
+  const returnTime = homeward ? homeward.time : target.getEndTime();
+
+  let goPop = null;
+  try {
+    goPop = getPrecipitationProbabilityAt_(goTime);
+  } catch (e) {
+    Logger.log('降水確率の取得でエラー(みつき送迎・行き): ' + e.message);
+  }
+  const go = evaluateRainCondition_(goPop, [], config);
+
+  let returnPop = null;
+  try {
+    returnPop = getPrecipitationProbabilityAt_(returnTime);
+  } catch (e) {
+    Logger.log('降水確率の取得でエラー(みつき送迎・帰り): ' + e.message);
+  }
+  const ret = evaluateRainCondition_(returnPop, [], config);
+
+  const escortNeeded = go.rainy || ret.rainy;
+
+  return {
+    label: label,
+    mode: escortNeeded ? '送迎' : '徒歩',
+    goTime: goTime,
+    returnTime: returnTime,
+    go: go,
+    ret: ret,
   };
 }
