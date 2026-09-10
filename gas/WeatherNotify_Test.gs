@@ -177,15 +177,17 @@ function testDangerWarningSmoke() {
   const areas = extractMunicipalityWarningAreas_(warningJson);
   Logger.log('=== 市区町村単位areas件数: ' + areas.length + ' ===');
 
-  Logger.log('=== 対象3市町村(推定コード)の照合結果 ===');
+  Logger.log('=== 対象市町村(確認済みコード)の照合結果 ===');
   DANGER_WARNING_MUNICIPALITIES_.forEach(function (muni) {
-    const area = areas.find(function (a) { return a.code === muni.code; });
-    if (!area) {
-      Logger.log(muni.label + '(推定コード' + muni.code + '): 一致するareaが見つかりませんでした。' +
-        '下の全件ログから、実際のコードを確認してください。');
-    } else {
-      Logger.log(muni.label + '(コード' + muni.code + '): ' + JSON.stringify(area));
-    }
+    muni.codes.forEach(function (code) {
+      const area = areas.find(function (a) { return a.code === code; });
+      if (!area) {
+        Logger.log(muni.label + '(コード' + code + '): 一致するareaが見つかりませんでした。' +
+          '下の全件ログから、実際のコードを確認してください。');
+      } else {
+        Logger.log(muni.label + '(コード' + code + '): ' + JSON.stringify(area));
+      }
+    });
   });
 
   Logger.log('=== areas全件(先頭30件、実際のコード・警報一覧確認用) ===');

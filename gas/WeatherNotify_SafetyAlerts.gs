@@ -7,13 +7,14 @@
  * 危険警報が発表されているかを確認し、発表されていれば登校提案メッセージの冒頭に明記する。
  *
  * 【現状のステータス(要検証・暫定実装)】
- * 「危険警報」は2026年5月に始まったばかりの新しい情報体系です。この開発環境からは
- * www.jma.go.jp への直接アクセスができない(ネットワークポリシーでブロック)ため、実際のJSON
- * レスポンスの中でどのフィールド・コード値が「危険警報」を表すのかを確認できていません。
- * まず対象市町村の生データをログに出す疎通確認(testDangerWarningSmoke、WeatherNotify_Test.gs)を
- * 用意したので、GAS上で一度実行し、結果を確認してから判定ロジック(matchesDangerWarning_)を
- * 確定させてください。それまでは、checkDangerWarnings_は常に「該当なし」を返す安全側の暫定実装です
- * (誤って警報を出さないだけで、既存の通知処理を止めたり壊したりすることはありません)。
+ * testDangerWarningSmokeの実行により、対象市町村コード(市区町村単位areasのcode)は確認済みです。
+ * 豊田市は西部(2321101・自宅側)と東部(2321102)の2区域に分かれているため、どちらか一方でも
+ * 該当すれば警告する形で両方を監視対象にしています。
+ * 一方、警報コード自体の判定ロジック(どのcode値が「危険警報」=レベル4相当を表すか)はまだ未確定です。
+ * 現時点の観測ではcode:"20"(注意報レベル)しか確認できておらず、警報級以上のデータは未観測のため、
+ * 実際に警報級以上の状況が発生した際に改めてtestDangerWarningSmokeを実行し、その結果を見てから
+ * matchesDangerWarning_を実装する方針です。それまでは、checkDangerWarnings_は常に「該当なし」を返す
+ * 安全側の暫定実装です(誤って警報を出さないだけで、既存の通知処理を止めたり壊したりすることはありません)。
  *
  * ■ 河川水位情報(逢妻女川・千足橋観測所)へのリンク
  * 当初は国土交通省「川の防災情報」(river.go.jp)から水位・危険度を自動取得する案でしたが、
@@ -38,13 +39,13 @@ function buildRiverLevelInfoLine_() {
 
 const JMA_WARNING_URL_AICHI_ = 'https://www.jma.go.jp/bosai/warning/data/warning/230000.json';
 
-// 対象市町村(警報JSON内の市区町村単位areasのcodeと照合する)。
-// コードはJIS地方公共団体コード+"00"という一般的な規則から推定した値で、未検証。
-// testDangerWarningSmokeの実行結果で実際のコード・名称と突き合わせてから確定させてください。
+// 対象市町村(警報JSON内の市区町村単位areasのcodeと照合する。testDangerWarningSmokeの実行結果で確認済み)。
+// 豊田市は西部(2321101)・東部(2321102)の2区域に分かれており、自宅は西部側だが境界付近のリスクも
+// 考慮し、どちらか一方でも危険警報が出ていれば警告するよう両方を監視対象にしている。
 const DANGER_WARNING_MUNICIPALITIES_ = [
-  { code: '2321100', label: '豊田市' }, // 自宅
-  { code: '2322500', label: '知立市' }, // 通学経路
-  { code: '2321000', label: '刈谷市' }, // 学校
+  { codes: ['2321101', '2321102'], label: '豊田市' }, // 自宅(西部2321101が該当。境界考慮で東部2321102も監視)
+  { codes: ['2322500'], label: '知立市' }, // 通学経路
+  { codes: ['2321000'], label: '刈谷市' }, // 学校
 ];
 
 // ==== 気象庁 警報・注意報JSON(愛知県)の生データを取得(数分キャッシュして呼び出し回数を抑える) ====
@@ -85,17 +86,22 @@ function extractMunicipalityWarningAreas_(warningJson) {
  */
 function checkDangerWarnings_() {
   const results = [];
+  const seen = {}; // 同じ市町村で複数コード(例: 豊田市の西部/東部)が同じ警報を出した場合の重複表示を防ぐ
   try {
     const warningJson = fetchJmaWarningRaw_();
     const areas = extractMunicipalityWarningAreas_(warningJson);
     DANGER_WARNING_MUNICIPALITIES_.forEach(function (muni) {
-      const area = areas.find(function (a) { return a.code === muni.code; });
-      if (!area || !area.warnings) return;
-      area.warnings.forEach(function (w) {
-        const desc = matchesDangerWarning_(w);
-        if (desc) {
+      muni.codes.forEach(function (code) {
+        const area = areas.find(function (a) { return a.code === code; });
+        if (!area || !area.warnings) return;
+        area.warnings.forEach(function (w) {
+          const desc = matchesDangerWarning_(w);
+          if (!desc) return;
+          const key = muni.label + '|' + desc;
+          if (seen[key]) return;
+          seen[key] = true;
           results.push({ municipality: muni.label, description: desc });
-        }
+        });
       });
     });
   } catch (e) {
