@@ -13,6 +13,9 @@
  *     WEATHER_DRY_RUN=true(デフォルト)であればLINE送信は行われず、ログに出力されるだけなので安全。
  * ・testFinalNotificationForTomorrow()
  *     「確定版」ロジック(下校時アラートの予約を含む)を、明日を対象日として即座に検証する。
+ * ・testDangerWarningSmoke()
+ *     気象庁 警報・注意報JSON(危険警報)の生データをログに出す疎通確認・調査用。
+ *     判定ロジック(matchesDangerWarning_)がまだ未実装のため、実データを見て確定させるために使う。
  * ------------------------------------------------------------
  */
 
@@ -154,6 +157,47 @@ function testWeatherApiSmoke() {
   Logger.log('=== 自転車移動時間(自宅→前林中学校)確認 ===');
   const minutes = getBikingTravelMinutes_(WEATHER_LOCATIONS_.HOME.address, WEATHER_LOCATIONS_.SCHOOL_MITSUKI.address);
   Logger.log('自転車移動時間: ' + minutes + '分');
+}
+
+/**
+ * 気象庁 警報・注意報JSON(危険警報)の生データを確認する疎通確認・調査用関数。
+ * 「危険警報」は判定ロジック(matchesDangerWarning_)が未実装のため、
+ * この関数の実行結果(実際のcode値・ステータス表記・その他のフィールド)を見てから
+ * WeatherNotify_SafetyAlerts.gsのmatchesDangerWarning_を実装してください。
+ */
+function testDangerWarningSmoke() {
+  let warningJson;
+  try {
+    warningJson = fetchJmaWarningRaw_();
+  } catch (e) {
+    Logger.log('[エラー] 警報JSON取得: ' + e.message);
+    return;
+  }
+
+  const areas = extractMunicipalityWarningAreas_(warningJson);
+  Logger.log('=== 市区町村単位areas件数: ' + areas.length + ' ===');
+
+  Logger.log('=== 対象3市町村(推定コード)の照合結果 ===');
+  DANGER_WARNING_MUNICIPALITIES_.forEach(function (muni) {
+    const area = areas.find(function (a) { return a.code === muni.code; });
+    if (!area) {
+      Logger.log(muni.label + '(推定コード' + muni.code + '): 一致するareaが見つかりませんでした。' +
+        '下の全件ログから、実際のコードを確認してください。');
+    } else {
+      Logger.log(muni.label + '(コード' + muni.code + '): ' + JSON.stringify(area));
+    }
+  });
+
+  Logger.log('=== areas全件(先頭30件、実際のコード・警報一覧確認用) ===');
+  areas.slice(0, 30).forEach(function (a) {
+    Logger.log(JSON.stringify(a));
+  });
+  if (areas.length > 30) {
+    Logger.log('...他 ' + (areas.length - 30) + '件(省略)');
+  }
+
+  Logger.log('=== JSON全体のトップレベル構造(キー一覧) ===');
+  Logger.log(Object.keys(warningJson).join(', '));
 }
 
 /**

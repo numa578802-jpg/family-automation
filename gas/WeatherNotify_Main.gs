@@ -57,11 +57,22 @@ function runWeatherNotification_(targetDate, isFinal) {
   }
   const dateStr = Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyy-MM-dd');
 
+  // 危険警報チェック(確定版のみ。現状はmatchesDangerWarning_が未実装のため常にnullを返す暫定実装)
+  let dangerWarningLine = null;
+  if (isFinal) {
+    try {
+      dangerWarningLine = buildDangerWarningLine_(checkDangerWarnings_());
+    } catch (e) {
+      Logger.log('危険警報チェックの呼び出しでエラー(通知全体は続行します): ' + e.message);
+    }
+  }
+
   // ゆうきさん(バス/自転車提案。朝・帰り往復で判定) → ゆうき本人 + 一志さん・きくみさん(CC、内容確認用)
   try {
     if (isYukiSchoolDay_(targetDate, calendarId)) {
       const result = decideYukiTransport_(targetDate, isFinal, calendarId);
-      const message = buildYukiMessage_(targetDate, result, isFinal);
+      let message = buildYukiMessage_(targetDate, result, isFinal);
+      if (dangerWarningLine) message = dangerWarningLine + '\n\n' + message;
       sendLinePushToRecipients_([config.lineUserIdYuki, config.lineUserIdKazushi, config.lineUserIdKikumi], message);
     } else {
       Logger.log('ゆうきさん: ' + dateStr + ' は登校日ではないため通知をスキップしました。');
@@ -74,7 +85,8 @@ function runWeatherNotification_(targetDate, isFinal) {
   try {
     const result = decideMitsukiReminder_(targetDate, calendarId);
     if (result) {
-      const message = buildMitsukiMessage_(targetDate, result, isFinal);
+      let message = buildMitsukiMessage_(targetDate, result, isFinal);
+      if (dangerWarningLine) message = dangerWarningLine + '\n\n' + message;
       sendLinePushToRecipients_([config.lineUserIdMitsuki, config.lineUserIdKazushi, config.lineUserIdKikumi], message);
     } else {
       Logger.log('みつきさん: ' + dateStr + ' はリマインド対象の予定が無いため通知をスキップしました。');
