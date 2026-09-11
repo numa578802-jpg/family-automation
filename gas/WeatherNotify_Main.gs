@@ -57,27 +57,26 @@ function runWeatherNotification_(targetDate, isFinal) {
   }
   const dateStr = Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyy-MM-dd');
 
-  // 朝の登校提案メッセージの冒頭に付ける安全情報(危険警報+河川水位情報リンク)を組み立てる。
-  // 危険警報は確定版のみ判定(現状はmatchesDangerWarning_が未実装のため常にnullを返す暫定実装)。
-  // 河川水位情報リンクは常時固定表示(自動取得はしない。リンクのみ)。
-  const safetyPrefixLines = [];
+  // 朝の登校提案メッセージに付ける安全情報。
+  // 危険警報は本文より優先度が高いため冒頭に配置(確定版のみ判定。現状はmatchesDangerWarning_が
+  // 未実装のため常にnullを返す暫定実装)。河川水位情報リンクは本文の末尾に追記する(常時固定表示。自動取得はしない)。
+  let dangerWarningPrefix = '';
   if (isFinal) {
     try {
       const warningLine = buildDangerWarningLine_(checkDangerWarnings_());
-      if (warningLine) safetyPrefixLines.push(warningLine);
+      if (warningLine) dangerWarningPrefix = warningLine + '\n\n';
     } catch (e) {
       Logger.log('危険警報チェックの呼び出しでエラー(通知全体は続行します): ' + e.message);
     }
   }
   const riverLine = buildRiverLevelInfoLine_();
-  if (riverLine) safetyPrefixLines.push(riverLine);
-  const safetyPrefix = safetyPrefixLines.length > 0 ? safetyPrefixLines.join('\n') + '\n\n' : '';
+  const riverSuffix = riverLine ? '\n\n' + riverLine : '';
 
   // ゆうきさん(バス/自転車提案。朝・帰り往復で判定) → ゆうき本人 + 一志さん・きくみさん(CC、内容確認用)
   try {
     if (isYukiSchoolDay_(targetDate, calendarId)) {
       const result = decideYukiTransport_(targetDate, isFinal, calendarId);
-      const message = safetyPrefix + buildYukiMessage_(targetDate, result, isFinal);
+      const message = dangerWarningPrefix + buildYukiMessage_(targetDate, result, isFinal) + riverSuffix;
       sendLinePushToRecipients_([config.lineUserIdYuki, config.lineUserIdKazushi, config.lineUserIdKikumi], message);
     } else {
       Logger.log('ゆうきさん: ' + dateStr + ' は登校日ではないため通知をスキップしました。');
@@ -90,7 +89,7 @@ function runWeatherNotification_(targetDate, isFinal) {
   try {
     const result = decideMitsukiReminder_(targetDate, calendarId);
     if (result) {
-      const message = safetyPrefix + buildMitsukiMessage_(targetDate, result, isFinal);
+      const message = dangerWarningPrefix + buildMitsukiMessage_(targetDate, result, isFinal) + riverSuffix;
       sendLinePushToRecipients_([config.lineUserIdMitsuki, config.lineUserIdKazushi, config.lineUserIdKikumi], message);
     } else {
       Logger.log('みつきさん: ' + dateStr + ' はリマインド対象の予定が無いため通知をスキップしました。');
@@ -330,5 +329,7 @@ function buildHomewardRainAlertMessage_(personLabel, homewardTime, rainSpotDetai
   }
   const sourceLine = buildSourceLinksLine_(false, rainSpotDetails.length > 0);
   if (sourceLine) lines.push(sourceLine);
+  const riverLine = buildRiverLevelInfoLine_();
+  if (riverLine) lines.push(riverLine);
   return lines.join('\n');
 }
