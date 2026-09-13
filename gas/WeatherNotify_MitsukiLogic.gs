@@ -1,9 +1,12 @@
 /**
  * みつきさん(前林中学校) 出発時刻リマインドロジック
  * ------------------------------------------------------------
- * ・その日の最初の【みつき】予定(部活・習い事等、カレンダーに時刻付きで登録されているもの)の
- *   開始時刻から逆算して「家を出るべき時刻」を算出する。
- * ・時刻付きの予定がその日に無い場合でも、登校日であれば通常授業の登校時刻
+ * ・その日の最初の【みつき】予定のうち、午前中(MITSUKI_MORNING_CUTOFF_HOUR_より前)に始まるもの
+ *   (部活の朝練等、カレンダーに時刻付きで登録されているもの)の開始時刻から逆算して
+ *   「家を出るべき時刻」を算出する。英語(塾)・お茶のような午後/夕方の習い事はここでは対象外とし、
+ *   あくまで朝の登校(または午前中の活動開始)に関連する予定のみを対象にする
+ *   (下校時刻算出(getHomewardDepartureTime_)は逆に夕方の予定も含めて判定するため、混同しないこと)。
+ * ・午前中の時刻付き予定がその日に無い場合でも、登校日であれば通常授業の登校時刻
  *   (MITSUKI_DEFAULT_SCHOOL_START、確定値)を基準に算出する。
  * ・移動時間はGASのMapsサービスで自宅→目的地(予定のlocationが未設定なら学校)の自転車移動時間を取得
  *   (みつきさんは自転車通学のため)。
@@ -20,6 +23,10 @@ function getMitsukiDefaultSchoolStart_() {
     MITSUKI_DEFAULT_SCHOOL_START_FALLBACK_;
 }
 
+// 「出発時刻のお知らせ」が対象とする時間帯の上限。この時刻より前に始まる【みつき】予定のみを
+// 朝の出発対象とし、英語(塾)やお茶のような午後・夕方の習い事を誤って拾わないようにする。
+const MITSUKI_MORNING_CUTOFF_HOUR_ = 12;
+
 // 通常下校時刻(要確認・調整。実際の下校時刻に合わせて後で修正してください)
 const MITSUKI_DEFAULT_SCHOOL_END_PROP_ = 'MITSUKI_DEFAULT_SCHOOL_END';
 const MITSUKI_DEFAULT_SCHOOL_END_FALLBACK_ = '16:00';
@@ -34,21 +41,25 @@ function isMitsukiSchoolDay_(date, calendarId) {
   return isSchoolDay_(date, calendarId, '【みつき】');
 }
 
-// ==== 対象日の「基準となる予定」(最初の時刻付き【みつき】予定、無ければ通常登校)を取得 ====
+// ==== 対象日の「基準となる予定」(午前中の最初の時刻付き【みつき】予定、無ければ通常登校)を取得 ====
 function getMitsukiTargetEvent_(targetDate, calendarId) {
   const dateStr = Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyy-MM-dd');
   const dayStart = new Date(dateStr + 'T00:00:00');
   const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+  const morningCutoff = new Date(dateStr + 'T00:00:00');
+  morningCutoff.setHours(MITSUKI_MORNING_CUTOFF_HOUR_, 0, 0, 0);
 
   const calendar = CalendarApp.getCalendarById(calendarId);
   const events = calendar.getEvents(dayStart, dayEnd);
-  const timedMitsukiEvents = events.filter(function (ev) {
-    return ev.getTitle().indexOf('【みつき】') === 0 && !ev.isAllDayEvent();
+  // 英語(塾)・お茶のような午後/夕方の習い事を誤って拾わないよう、午前中に始まる予定のみを対象にする
+  const timedMitsukiMorningEvents = events.filter(function (ev) {
+    return ev.getTitle().indexOf('【みつき】') === 0 && !ev.isAllDayEvent() &&
+      ev.getStartTime() < morningCutoff;
   });
-  timedMitsukiEvents.sort(function (a, b) { return a.getStartTime() - b.getStartTime(); });
+  timedMitsukiMorningEvents.sort(function (a, b) { return a.getStartTime() - b.getStartTime(); });
 
-  if (timedMitsukiEvents.length > 0) {
-    const ev = timedMitsukiEvents[0];
+  if (timedMitsukiMorningEvents.length > 0) {
+    const ev = timedMitsukiMorningEvents[0];
     return {
       label: ev.getTitle().replace('【みつき】', ''),
       startTime: ev.getStartTime(),
