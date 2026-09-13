@@ -85,12 +85,14 @@ function runWeatherNotification_(targetDate, isFinal) {
     Logger.log('ゆうきさんの通知処理でエラー: ' + e.message);
   }
 
-  // みつきさん(出発時刻リマインド) → みつき本人 + 一志さん・きくみさん(CC、内容確認用)
+  // みつきさん(出発時刻リマインド。時刻付き予定ごとに1通ずつ) → みつき本人 + 一志さん・きくみさん(CC、内容確認用)
   try {
-    const result = decideMitsukiReminder_(targetDate, calendarId);
-    if (result) {
-      const message = dangerWarningPrefix + buildMitsukiMessage_(targetDate, result, isFinal) + riverSuffix;
-      sendLinePushToRecipients_([config.lineUserIdMitsuki, config.lineUserIdKazushi, config.lineUserIdKikumi], message);
+    const results = decideMitsukiReminders_(targetDate, calendarId);
+    if (results.length > 0) {
+      results.forEach(function (result) {
+        const message = dangerWarningPrefix + buildMitsukiMessage_(targetDate, result, isFinal) + riverSuffix;
+        sendLinePushToRecipients_([config.lineUserIdMitsuki, config.lineUserIdKazushi, config.lineUserIdKikumi], message);
+      });
     } else {
       Logger.log('みつきさん: ' + dateStr + ' はリマインド対象の予定が無いため通知をスキップしました。');
     }
@@ -143,7 +145,7 @@ function buildYukiMessage_(targetDate, result, isFinal) {
   const dateLabel = formatDateLabelJa_(targetDate);
   const versionLabel = isFinal ? '確定版' : '暫定版';
   const lines = [];
-  lines.push('【' + dateLabel + ' 登校 天気予報 - ' + versionLabel + '】');
+  lines.push('【ゆうき】' + dateLabel + ' 登校 天気予報 - ' + versionLabel);
 
   const morningRainy = result.morning.rainy;
   const afternoonRainy = result.afternoon.rainy;
@@ -182,7 +184,7 @@ function buildMitsukiMessage_(targetDate, result, isFinal) {
   const startLabel = Utilities.formatDate(result.startTime, 'Asia/Tokyo', 'H:mm');
 
   const lines = [];
-  lines.push('【' + dateLabel + ' 出発時刻のお知らせ - ' + versionLabel + '】');
+  lines.push('【みつき】' + dateLabel + ' 出発時刻のお知らせ - ' + versionLabel);
   lines.push('予定: ' + result.label + '(' + startLabel + '〜)');
   lines.push('家を出る目安: ' + departureLabel + '頃');
   const detailParts = ['自転車で約' + result.travelMinutes + '分'];
@@ -209,7 +211,7 @@ function buildMitsukiEscortMessage_(targetDate, result, isFinal) {
   const returnLabel = Utilities.formatDate(result.returnTime, 'Asia/Tokyo', 'H:mm');
 
   const lines = [];
-  lines.push('【' + dateLabel + ' ' + result.label + ' 送迎提案 - ' + versionLabel + '】');
+  lines.push('【みつき】' + dateLabel + ' ' + result.label + ' 送迎提案 - ' + versionLabel);
   if (result.mode === '送迎') {
     lines.push('送迎(祖父母または父)を検討してください。');
   } else {
@@ -318,7 +320,7 @@ function runScheduledHomewardAlerts_(e) {
 function buildHomewardRainAlertMessage_(personLabel, homewardTime, rainSpotDetails) {
   const timeLabel = Utilities.formatDate(homewardTime, 'Asia/Tokyo', 'H:mm');
   const lines = [];
-  lines.push('【' + personLabel + ' 下校時 雨雲通過予報】');
+  lines.push('【' + personLabel + '】下校時 雨雲通過予報');
   lines.push('下校予定(' + timeLabel + '頃)にかけての雨雲の様子:');
   if (rainSpotDetails.length === 0) {
     lines.push('雨雲情報を取得できませんでした。');
