@@ -267,13 +267,16 @@ function scheduleHomewardRainAlerts_(targetDate, calendarId) {
   const leadMin = config.homewardAlertLeadMin;
 
   scheduleHomewardRainAlertFor_('YUKI', 'ゆうき', targetDate, calendarId, '【ゆうき】',
-    getYukiDefaultSchoolEnd_(), YUKI_ROUTE_CHECK_KEYS_, config.lineUserIdYuki, leadMin);
+    getYukiDefaultSchoolEnd_(), YUKI_ROUTE_CHECK_KEYS_, config.lineUserIdYuki, leadMin, null);
+  // 英語・お茶は「学校から家に向かう予定」ではない(いったん帰宅してから家庭発で出発する)ため、
+  // 下校予定時刻の算出対象からは除外する(含めると下校時刻が大幅に後ろへずれ、アラートの発火予約も
+  // 連動してずれてしまうバグになる)。
   scheduleHomewardRainAlertFor_('MITSUKI', 'みつき', targetDate, calendarId, '【みつき】',
-    getMitsukiDefaultSchoolEnd_(), ['HOME', 'SCHOOL_MITSUKI'], config.lineUserIdMitsuki, leadMin);
+    getMitsukiDefaultSchoolEnd_(), ['HOME', 'SCHOOL_MITSUKI'], config.lineUserIdMitsuki, leadMin, MITSUKI_LESSON_NAMES_);
 }
 
-function scheduleHomewardRainAlertFor_(personKey, personLabel, targetDate, calendarId, namePrefix, defaultEndTime, routeKeys, selfUserId, leadMin) {
-  const homeward = getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultEndTime);
+function scheduleHomewardRainAlertFor_(personKey, personLabel, targetDate, calendarId, namePrefix, defaultEndTime, routeKeys, selfUserId, leadMin, excludeLabelKeywords) {
+  const homeward = getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultEndTime, excludeLabelKeywords);
   if (!homeward) {
     Logger.log(personLabel + ': 下校予定が無いため、下校時雨雲アラートは予約しませんでした。');
     return;

@@ -233,7 +233,9 @@ function testHomewardDepartureSmoke() {
   ['ゆうき', 'みつき'].forEach(function (name) {
     const namePrefix = '【' + name + '】';
     const defaultEnd = name === 'ゆうき' ? getYukiDefaultSchoolEnd_() : getMitsukiDefaultSchoolEnd_();
-    const result = getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultEnd);
+    // みつきさんは英語・お茶(家庭発の予定)を下校予定時刻の算出対象から除外する(本番と同じ条件)
+    const excludeLabelKeywords = name === 'みつき' ? MITSUKI_LESSON_NAMES_ : null;
+    const result = getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultEnd, excludeLabelKeywords);
     if (!result) {
       Logger.log(name + ': 対象日は下校予定なし(登校日でもなく、時刻付きの予定も無い)');
     } else {

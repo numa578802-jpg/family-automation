@@ -112,8 +112,10 @@ function getMitsukiTargetEvents_(targetDate, calendarId) {
   }
 
   if (afternoonEvents.length > 0) {
-    // 下校予定時刻より後に始まる習い事(英語・お茶)かどうかの判定に使うため、ここで1回だけ算出する
-    const homeward = getHomewardDepartureTime_(targetDate, calendarId, '【みつき】', getMitsukiDefaultSchoolEnd_());
+    // 下校予定時刻より後に始まる習い事(英語・お茶)かどうかの判定に使うため、ここで1回だけ算出する。
+    // 英語・お茶自体は「学校から家に向かう予定」ではない(いったん帰宅してから家庭発で出発する)ため、
+    // 下校予定時刻の算出対象からは除外する(MITSUKI_LESSON_NAMES_)。
+    const homeward = getHomewardDepartureTime_(targetDate, calendarId, '【みつき】', getMitsukiDefaultSchoolEnd_(), MITSUKI_LESSON_NAMES_);
 
     afternoonEvents.forEach(function (ev) {
       const label = ev.getTitle().replace('【みつき】', '');
@@ -222,7 +224,7 @@ function decideMitsukiEscort_(targetDate, calendarId) {
   const label = target.getTitle().replace('【みつき】', '');
   const goTime = target.getStartTime();
 
-  const homeward = getHomewardDepartureTime_(targetDate, calendarId, '【みつき】', getMitsukiDefaultSchoolEnd_());
+  const homeward = getHomewardDepartureTime_(targetDate, calendarId, '【みつき】', getMitsukiDefaultSchoolEnd_(), MITSUKI_LESSON_NAMES_);
   const returnTime = homeward ? homeward.time : target.getEndTime();
 
   let goPop = null;

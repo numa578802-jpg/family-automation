@@ -182,7 +182,11 @@ function evaluateRainCondition_(pop, rainSpotDetails, config) {
 /**
  * 対象日の「学校(または活動場所)から家に向かって出発する時刻」を、ゆうき・みつき共通で算出する。
  * ルール:
- *   1. 対象日に時刻付きの【namePrefix】予定(部活動・習い事等)があれば、最も遅く終わる予定の終了時刻を候補にする。
+ *   1. 対象日に時刻付きの【namePrefix】予定(部活動等、学校発の予定)があれば、最も遅く終わる予定の
+ *      終了時刻を候補にする。ただし予定名がexcludeLabelKeywordsのいずれかを含む場合は候補から除外する
+ *      (英語・お茶のような、いったん家に帰ってから改めて家庭から出発する予定は、
+ *      「学校から家に向かう時刻」の計算には含めない。含めてしまうと、実際の下校時刻より大幅に遅い
+ *      時刻が「下校予定」として算出されてしまい、下校時雨雲アラートの発火予約が大きくずれるバグになる)。
  *   2. 対象日が登校日であれば、defaultTimeStr(通常の下校時刻)も候補にする。
  *   3. 候補が複数ある場合は、より遅い時刻(＝より現実的に家へ向かう時刻)を採用する。
  *   4. 候補が1つも無い場合(登校日でもなく、予定も無い)はnullを返す。
@@ -190,9 +194,10 @@ function evaluateRainCondition_(pop, rainSpotDetails, config) {
  * @param {string} calendarId 家族共有カレンダーのID
  * @param {string} namePrefix '【ゆうき】' または '【みつき】'
  * @param {string} defaultTimeStr 通常下校時刻(例: '16:00')
+ * @param {string[]} [excludeLabelKeywords] この文字列のいずれかを予定名に含む場合、候補から除外する(部分一致)
  * @return {{time: Date, source: 'calendar'|'default', label: string}|null}
  */
-function getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultTimeStr) {
+function getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultTimeStr, excludeLabelKeywords) {
   const dateStr = Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyy-MM-dd');
   const dayStart = new Date(dateStr + 'T00:00:00');
   const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
@@ -204,10 +209,12 @@ function getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultTi
     const events = calendar.getEvents(dayStart, dayEnd);
     events.forEach(function (ev) {
       if (ev.getTitle().indexOf(namePrefix) !== 0 || ev.isAllDayEvent()) return;
+      const label = ev.getTitle().replace(namePrefix, '');
+      if (excludeLabelKeywords && excludeLabelKeywords.some(function (kw) { return label.indexOf(kw) !== -1; })) return;
       const end = ev.getEndTime();
       if (!latestEventEnd || end > latestEventEnd) {
         latestEventEnd = end;
-        latestEventLabel = ev.getTitle().replace(namePrefix, '');
+        latestEventLabel = label;
       }
     });
   } catch (e) {
