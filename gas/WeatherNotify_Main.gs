@@ -120,6 +120,11 @@ function runWeatherNotification_(targetDate, isFinal) {
     } catch (e) {
       Logger.log('下校時雨雲アラートの予約処理でエラー: ' + e.message);
     }
+    try {
+      scheduleMitsukiLessonDepartureAlerts_(targetDate, calendarId);
+    } catch (e) {
+      Logger.log('みつきさんの習い事出発時刻アラートの予約処理でエラー: ' + e.message);
+    }
   }
 }
 
@@ -180,8 +185,22 @@ function buildYukiMessage_(targetDate, result, isFinal) {
 function buildMitsukiMessage_(targetDate, result, isFinal) {
   const dateLabel = formatDateLabelJa_(targetDate);
   const versionLabel = isFinal ? '確定版' : '暫定版';
-  const departureLabel = Utilities.formatDate(result.departureTime, 'Asia/Tokyo', 'H:mm');
   const startLabel = Utilities.formatDate(result.startTime, 'Asia/Tokyo', 'H:mm');
+
+  if (result.announceOnly) {
+    // 下校予定時刻より後の習い事(英語・お茶)。朝は予告のみとし、出発時刻の詳細は
+    // 開始1時間前の個別案内(runScheduledMitsukiLessonDepartureAlerts_)で別途送信する。
+    const lines = [];
+    lines.push('【みつき】' + dateLabel + ' 出発時刻のお知らせ - ' + versionLabel);
+    lines.push('本日は' + result.label + 'の予定があります(' + startLabel + '〜)。');
+    lines.push('出発時刻のお知らせは、開始1時間前に改めてお送りします。');
+    if (!isFinal) {
+      lines.push('※当日6:30頃に確定版をお送りします');
+    }
+    return lines.join('\n');
+  }
+
+  const departureLabel = Utilities.formatDate(result.departureTime, 'Asia/Tokyo', 'H:mm');
 
   const lines = [];
   lines.push('【みつき】' + dateLabel + ' 出発時刻のお知らせ - ' + versionLabel);
@@ -334,4 +353,92 @@ function buildHomewardRainAlertMessage_(personLabel, homewardTime, rainSpotDetai
   const riverLine = buildRiverLevelInfoLine_();
   if (riverLine) lines.push(riverLine);
   return lines.join('\n');
+}
+
+/**
+ * みつきさんの習い事(英語・お茶)出発時刻アラート(新規)
+ * ------------------------------------------------------------
+ * 下校予定時刻より後に始まる習い事は、朝の確定版配信では予告のみとしているため
+ * (buildMitsukiMessage_のannounceOnly分岐)、その予定の開始1時間前に改めて
+ * 出発時刻の詳細(予定名・家を出る目安・降水確率・出典リンク・水位情報リンク)を送る。
+ * 下校時雨雲アラート(scheduleHomewardRainAlerts_)と同じ、スクリプトプロパティ+
+ * 使い捨てトリガーによる予約パターンを踏襲している。
+ * ------------------------------------------------------------
+ */
+const MITSUKI_LESSON_ALERT_PENDING_PREFIX_ = 'PENDING_MITSUKI_LESSON_ALERT_';
+const MITSUKI_LESSON_ALERT_LEAD_MIN_ = 60;
+
+// ==== 確定版配信時に、朝は予告のみとした習い事それぞれの開始1時間前アラートを予約する ====
+function scheduleMitsukiLessonDepartureAlerts_(targetDate, calendarId) {
+  const config = getWeatherConfig_();
+  const announceOnlyEvents = getMitsukiAnnounceOnlyLessonEvents_(targetDate, calendarId);
+  if (announceOnlyEvents.length === 0) {
+    Logger.log('みつきさん: 予告のみの習い事が無いため、個別出発時刻アラートは予約しませんでした。');
+    return;
+  }
+
+  announceOnlyEvents.forEach(function (target, index) {
+    const alertTime = new Date(target.startTime.getTime() - MITSUKI_LESSON_ALERT_LEAD_MIN_ * 60 * 1000);
+    if (alertTime.getTime() <= Date.now()) {
+      Logger.log('みつきさん: ' + target.label + '(' + target.startTime + ')の開始時刻が近すぎる/過去のため、個別出発時刻アラートは予約しませんでした。');
+      return;
+    }
+
+    const props = PropertiesService.getScriptProperties();
+    const key = MITSUKI_LESSON_ALERT_PENDING_PREFIX_ + Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyyMMdd') + '_' + index;
+    props.setProperty(key, JSON.stringify({
+      label: target.label,
+      startTime: target.startTime.toISOString(),
+      destinationAddress: target.destinationAddress,
+      selfUserId: config.lineUserIdMitsuki,
+      scheduledAt: alertTime.toISOString(),
+    }));
+    ScriptApp.newTrigger('runScheduledMitsukiLessonDepartureAlerts_').timeBased().at(alertTime).create();
+    Logger.log('みつきさん: ' + target.label + 'の出発時刻アラートを' + alertTime + 'に予約しました(開始予定 ' + target.startTime + ')。');
+  });
+}
+
+// ==== 予約されたみつきさんの習い事出発時刻アラートを、実際の時刻が来たら送信する(使い捨てトリガーから呼ばれる) ====
+function runScheduledMitsukiLessonDepartureAlerts_(e) {
+  // 自分自身を呼び出したトリガーは、多重実行を防ぐため実行後すぐ削除する
+  if (e && e.triggerUid) {
+    ScriptApp.getProjectTriggers().forEach(function (trigger) {
+      if (trigger.getUniqueId() === e.triggerUid) {
+        ScriptApp.deleteTrigger(trigger);
+      }
+    });
+  }
+
+  const props = PropertiesService.getScriptProperties();
+  const allProps = props.getProperties();
+  const now = Date.now();
+  const config = getWeatherConfig_();
+
+  Object.keys(allProps).forEach(function (key) {
+    if (key.indexOf(MITSUKI_LESSON_ALERT_PENDING_PREFIX_) !== 0) return;
+    const data = JSON.parse(allProps[key]);
+    // まだこのアラートの予定時刻に達していなければ、他の予定のトリガーからの呼び出しとみなしスキップする
+    if (new Date(data.scheduledAt).getTime() > now + 60 * 1000) return;
+
+    props.deleteProperty(key); // 二重送信防止のため、処理対象として取り出した時点で先に削除
+
+    try {
+      const startTime = new Date(data.startTime);
+      const travelMinutes = getBikingTravelMinutes_(WEATHER_LOCATIONS_.HOME.address, data.destinationAddress);
+
+      let pop = null;
+      try {
+        pop = getPrecipitationProbabilityAt_(startTime);
+      } catch (err) {
+        Logger.log('降水確率の取得でエラー(みつき個別出発時刻アラート): ' + err.message);
+      }
+
+      const result = calcMitsukiDeparture_(data.label, startTime, travelMinutes, pop, config);
+      const riverLine = buildRiverLevelInfoLine_();
+      const message = buildMitsukiMessage_(startTime, result, true) + (riverLine ? '\n\n' + riverLine : '');
+      sendLinePushToRecipients_([data.selfUserId, config.lineUserIdKazushi, config.lineUserIdKikumi], message);
+    } catch (err) {
+      Logger.log('みつきさんの個別出発時刻アラートの送信でエラー(' + data.label + '): ' + err.message);
+    }
+  });
 }

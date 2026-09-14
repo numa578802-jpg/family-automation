@@ -12,6 +12,11 @@
  * ・移動時間はGASのMapsサービスで自宅→目的地(予定のlocationが未設定なら学校)の自転車移動時間を取得
  *   (みつきさんは自転車通学のため)。
  * ・雨天時(降水確率がしきい値以上)は移動バッファ+10分(初期値)を加算する。
+ * ・下校予定時刻(getHomewardDepartureTime_)より後に始まる正午以降の予定のうち、家族プロフィールの
+ *   習い事名(英語・お茶)に一致するものは、朝の確定版では出発時刻の詳細を出さず予告文言のみとし、
+ *   開始1時間前に個別の使い捨てトリガーで改めて出発時刻のお知らせを送る(下校後いったん帰宅してから
+ *   出発するため、朝の時点では正確な出発時刻を確定できないことが多いため)。部活動などそれ以外の
+ *   予定は、これまで通り朝の時点でまとめて出発時刻を案内する。
  * ------------------------------------------------------------
  */
 
@@ -36,6 +41,17 @@ function getMitsukiDefaultSchoolEnd_() {
 // ==== 対象日がみつきさんの登校日かどうか判定(共通ロジックはConfig.gsのisSchoolDay_を使用) ====
 function isMitsukiSchoolDay_(date, calendarId) {
   return isSchoolDay_(date, calendarId, '【みつき】');
+}
+
+// 家族プロフィールに登録されている習い事名。この名称を含む予定のみ、
+// 下校予定時刻より後に始まる場合に「朝は予告のみ・開始1時間前に個別で出発時刻を案内」の対象とする
+// (部活動など、それ以外の予定はこれまで通り朝にまとめて案内する)。
+// 「英語(塾)」のようにカレンダー上は括弧書きが付く場合があるため、isMitsukiActivityRelevant_と
+// 同様に部分一致で判定する(完全一致ではない)。
+const MITSUKI_LESSON_NAMES_ = ['英語', 'お茶'];
+
+function isMitsukiLessonName_(label) {
+  return MITSUKI_LESSON_NAMES_.some(function (name) { return label.indexOf(name) !== -1; });
 }
 
 // 「出発時刻のお知らせ」で朝の1件目(登校/フォールバック)とみなす時間帯の上限。
@@ -95,17 +111,38 @@ function getMitsukiTargetEvents_(targetDate, calendarId) {
     Logger.log('[みつき出発時刻お知らせ診断] 朝(正午前)の予定なし、かつ登校日でもないため、朝の分は対象外');
   }
 
-  afternoonEvents.forEach(function (ev) {
-    Logger.log('[みつき出発時刻お知らせ診断] 正午以降の予定を追加の1件として使用: "' + ev.getTitle() + '"(' + formatTime(ev) + '〜)');
-    targets.push({
-      label: ev.getTitle().replace('【みつき】', ''),
-      startTime: ev.getStartTime(),
-      destinationAddress: ev.getLocation() || WEATHER_LOCATIONS_.SCHOOL_MITSUKI.address,
+  if (afternoonEvents.length > 0) {
+    // 下校予定時刻より後に始まる習い事(英語・お茶)かどうかの判定に使うため、ここで1回だけ算出する
+    const homeward = getHomewardDepartureTime_(targetDate, calendarId, '【みつき】', getMitsukiDefaultSchoolEnd_());
+
+    afternoonEvents.forEach(function (ev) {
+      const label = ev.getTitle().replace('【みつき】', '');
+      const isAfterHomeward = !!homeward && ev.getStartTime() > homeward.time;
+      const announceOnly = isAfterHomeward && isMitsukiLessonName_(label);
+      if (announceOnly) {
+        Logger.log('[みつき出発時刻お知らせ診断] 正午以降の予定を追加の1件として使用(下校予定時刻より後の習い事のため、朝は予告のみ・開始1時間前に個別案内): "' +
+          ev.getTitle() + '"(' + formatTime(ev) + '〜)');
+      } else {
+        Logger.log('[みつき出発時刻お知らせ診断] 正午以降の予定を追加の1件として使用(通常通り朝に出発時刻を案内): "' + ev.getTitle() + '"(' + formatTime(ev) + '〜)');
+      }
+      targets.push({
+        label: label,
+        startTime: ev.getStartTime(),
+        destinationAddress: ev.getLocation() || WEATHER_LOCATIONS_.SCHOOL_MITSUKI.address,
+        announceOnly: announceOnly,
+      });
     });
-  });
+  }
 
   Logger.log('[みつき出発時刻お知らせ診断] 最終的な配信対象件数=' + targets.length);
   return targets;
+}
+
+// ==== 朝は予告のみとした習い事(英語・お茶)の一覧を取得(開始1時間前の個別出発時刻案内で使用) ====
+function getMitsukiAnnounceOnlyLessonEvents_(targetDate, calendarId) {
+  return getMitsukiTargetEvents_(targetDate, calendarId).filter(function (target) {
+    return target.announceOnly;
+  });
 }
 
 /**
@@ -116,6 +153,12 @@ function decideMitsukiReminders_(targetDate, calendarId) {
   const targets = getMitsukiTargetEvents_(targetDate, calendarId);
   const config = getWeatherConfig_();
   return targets.map(function (target) {
+    if (target.announceOnly) {
+      // 下校予定時刻より後の習い事(英語・お茶)は、朝の時点では予告のみ。
+      // 出発時刻の詳細は開始1時間前の個別案内(runScheduledMitsukiLessonDepartureAlerts_)で算出する。
+      return { label: target.label, startTime: target.startTime, announceOnly: true };
+    }
+
     const travelMinutes = getBikingTravelMinutes_(WEATHER_LOCATIONS_.HOME.address, target.destinationAddress);
 
     let pop = null;

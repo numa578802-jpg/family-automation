@@ -243,6 +243,33 @@ function testHomewardDepartureSmoke() {
   });
 }
 
+/**
+ * みつきさんの「朝は予告のみ・開始1時間前に個別案内」ロジックの疎通確認(要実カレンダー)。
+ * getMitsukiTargetEvents_の診断ログ([みつき出発時刻お知らせ診断])に加えて、
+ * announceOnly対象(下校予定時刻より後の英語・お茶)の一覧、および各対象を実際に
+ * decideMitsukiReminders_/buildMitsukiMessage_に通した結果(予告メッセージの文面)を出力する。
+ * 「明日」など相対日付だと実行時刻(特に深夜)によって対象日がずれるため、
+ * targetDateの行を直接書き換えて、確認したい日付を指定してください。
+ */
+function testMitsukiAnnounceOnlyDiagnostic() {
+  const targetDate = new Date('2026-09-14T00:00:00+09:00'); // ここを書き換えれば任意の日付で確認可能(例: 英語の日=月曜)
+  const calendarId = getConfig_().calendarId;
+  Logger.log('=== 対象日: ' + Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyy-MM-dd') + ' ===');
+
+  const announceOnlyEvents = getMitsukiAnnounceOnlyLessonEvents_(targetDate, calendarId);
+  Logger.log('朝は予告のみとする対象件数=' + announceOnlyEvents.length);
+  announceOnlyEvents.forEach(function (ev) {
+    Logger.log(' - ' + ev.label + '(' + Utilities.formatDate(ev.startTime, 'Asia/Tokyo', 'H:mm') + '〜、開始1時間前=' +
+      Utilities.formatDate(new Date(ev.startTime.getTime() - MITSUKI_LESSON_ALERT_LEAD_MIN_ * 60 * 1000), 'Asia/Tokyo', 'H:mm') + ')');
+  });
+
+  const reminders = decideMitsukiReminders_(targetDate, calendarId);
+  reminders.forEach(function (result, i) {
+    Logger.log('--- 朝の確定版メッセージ サンプル(' + (i + 1) + '件目、announceOnly=' + !!result.announceOnly + ') ---');
+    Logger.log(buildMitsukiMessage_(targetDate, result, true));
+  });
+}
+
 // ==== 本番と同じ処理を1回流す(WEATHER_DRY_RUN=trueならLINE送信されずログのみ) ====
 function testFullRunDryRun() {
   const config = getWeatherConfig_();
