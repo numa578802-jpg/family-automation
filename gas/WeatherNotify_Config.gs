@@ -5,8 +5,15 @@
  * このファイルは地点情報・しきい値など、運用しながら調整する値をまとめています。
  *
  * ■ 追加で必要なスクリプトプロパティ
- *   LINE_CHANNEL_ACCESS_TOKEN … LINE Messaging APIのチャネルアクセストークン(長期)
- *   LINE_CHANNEL_SECRET       … LINE Messaging APIのChannel secret(Webhook署名検証用)
+ *   LINE_CHANNEL_ACCESS_TOKEN … 「崎家エージェント」(検証・デバッグ用)チャネルのアクセストークン(長期)
+ *   LINE_CHANNEL_SECRET       … 同チャネルのChannel secret(Webhook署名検証用。現状は未使用。将来の署名検証実装に備えて保持)
+ *   LINE_CHANNEL_ACCESS_TOKEN_YUKI / LINE_CHANNEL_SECRET_YUKI / LINE_WEBHOOK_TOKEN_YUKI
+ *   LINE_CHANNEL_ACCESS_TOKEN_MITSUKI / LINE_CHANNEL_SECRET_MITSUKI / LINE_WEBHOOK_TOKEN_MITSUKI
+ *   LINE_CHANNEL_ACCESS_TOKEN_KAZUSHI / LINE_CHANNEL_SECRET_KAZUSHI / LINE_WEBHOOK_TOKEN_KAZUSHI
+ *   LINE_CHANNEL_ACCESS_TOKEN_KIKUMI / LINE_CHANNEL_SECRET_KIKUMI / LINE_WEBHOOK_TOKEN_KIKUMI
+ *                              … 月200通の無料メッセージ枠がチャネル単位のため、配信先ごとに分けた
+ *                                4つの専用チャネル(崎家エージェント＠ゆうき用/みつき用/一志用/きくみ用)の
+ *                                認証情報。SECRETは現状未使用(検証用チャネルと同様)。詳細はWeatherNotify_Line.gs参照。
  *   YAHOO_APP_ID              … Yahoo!デベロッパーネットワークで発行するアプリケーションID(YOLP用)
  *
  * ■ 任意のスクリプトプロパティ(未設定なら下記デフォルト値を使用。運用しながら調整可能)
@@ -59,8 +66,14 @@ function getWeatherConfig_() {
     return value && !isNaN(n) ? n : fallback;
   };
   return {
+    // 検証・デバッグ用(既存の「崎家エージェント」チャネル)。手動テスト時のフォールバック先。
     lineChannelAccessToken: props.getProperty('LINE_CHANNEL_ACCESS_TOKEN') || '',
     lineChannelSecret: props.getProperty('LINE_CHANNEL_SECRET') || '',
+    // 配信先ごとに分けた専用チャネル(月200通の無料枠をチャネル単位で分散させるため)
+    lineChannelAccessTokenYuki: props.getProperty('LINE_CHANNEL_ACCESS_TOKEN_YUKI') || '',
+    lineChannelAccessTokenMitsuki: props.getProperty('LINE_CHANNEL_ACCESS_TOKEN_MITSUKI') || '',
+    lineChannelAccessTokenKazushi: props.getProperty('LINE_CHANNEL_ACCESS_TOKEN_KAZUSHI') || '',
+    lineChannelAccessTokenKikumi: props.getProperty('LINE_CHANNEL_ACCESS_TOKEN_KIKUMI') || '',
     yahooAppId: props.getProperty('YAHOO_APP_ID') || '',
     dryRun: (props.getProperty('WEATHER_DRY_RUN') || 'true') === 'true',
     lineUserIdYuki: props.getProperty('LINE_USER_ID_YUKI') || '',

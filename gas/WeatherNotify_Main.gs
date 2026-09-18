@@ -77,7 +77,7 @@ function runWeatherNotification_(targetDate, isFinal) {
     if (isYukiSchoolDay_(targetDate, calendarId)) {
       const result = decideYukiTransport_(targetDate, isFinal, calendarId);
       const message = dangerWarningPrefix + buildYukiMessage_(targetDate, result, isFinal) + riverSuffix;
-      sendLinePushToRecipients_([config.lineUserIdYuki, config.lineUserIdKazushi, config.lineUserIdKikumi], message);
+      sendLinePushToRecipients_(getPersonNotifyRecipients_(config, 'YUKI'), message);
     } else {
       Logger.log('ゆうきさん: ' + dateStr + ' は登校日ではないため通知をスキップしました。');
     }
@@ -91,7 +91,7 @@ function runWeatherNotification_(targetDate, isFinal) {
     if (results.length > 0) {
       results.forEach(function (result) {
         const message = dangerWarningPrefix + buildMitsukiMessage_(targetDate, result, isFinal) + riverSuffix;
-        sendLinePushToRecipients_([config.lineUserIdMitsuki, config.lineUserIdKazushi, config.lineUserIdKikumi], message);
+        sendLinePushToRecipients_(getPersonNotifyRecipients_(config, 'MITSUKI'), message);
       });
     } else {
       Logger.log('みつきさん: ' + dateStr + ' はリマインド対象の予定が無いため通知をスキップしました。');
@@ -105,7 +105,7 @@ function runWeatherNotification_(targetDate, isFinal) {
     const escortResult = decideMitsukiEscort_(targetDate, calendarId);
     if (escortResult) {
       const escortMessage = buildMitsukiEscortMessage_(targetDate, escortResult, isFinal);
-      sendLinePushToRecipients_([config.lineUserIdMitsuki, config.lineUserIdKazushi, config.lineUserIdKikumi], escortMessage);
+      sendLinePushToRecipients_(getPersonNotifyRecipients_(config, 'MITSUKI'), escortMessage);
     } else {
       Logger.log('みつきさん: ' + dateStr + ' は部活動/お茶の予定が無いため送迎提案をスキップしました。');
     }
@@ -267,15 +267,15 @@ function scheduleHomewardRainAlerts_(targetDate, calendarId) {
   const leadMin = config.homewardAlertLeadMin;
 
   scheduleHomewardRainAlertFor_('YUKI', 'ゆうき', targetDate, calendarId, '【ゆうき】',
-    getYukiDefaultSchoolEnd_(), YUKI_ROUTE_CHECK_KEYS_, config.lineUserIdYuki, leadMin, null);
+    getYukiDefaultSchoolEnd_(), YUKI_ROUTE_CHECK_KEYS_, leadMin, null);
   // 英語・お茶は「学校から家に向かう予定」ではない(いったん帰宅してから家庭発で出発する)ため、
   // 下校予定時刻の算出対象からは除外する(含めると下校時刻が大幅に後ろへずれ、アラートの発火予約も
   // 連動してずれてしまうバグになる)。
   scheduleHomewardRainAlertFor_('MITSUKI', 'みつき', targetDate, calendarId, '【みつき】',
-    getMitsukiDefaultSchoolEnd_(), ['HOME', 'SCHOOL_MITSUKI'], config.lineUserIdMitsuki, leadMin, MITSUKI_LESSON_NAMES_);
+    getMitsukiDefaultSchoolEnd_(), ['HOME', 'SCHOOL_MITSUKI'], leadMin, MITSUKI_LESSON_NAMES_);
 }
 
-function scheduleHomewardRainAlertFor_(personKey, personLabel, targetDate, calendarId, namePrefix, defaultEndTime, routeKeys, selfUserId, leadMin, excludeLabelKeywords) {
+function scheduleHomewardRainAlertFor_(personKey, personLabel, targetDate, calendarId, namePrefix, defaultEndTime, routeKeys, leadMin, excludeLabelKeywords) {
   const homeward = getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultEndTime, excludeLabelKeywords);
   if (!homeward) {
     Logger.log(personLabel + ': 下校予定が無いため、下校時雨雲アラートは予約しませんでした。');
@@ -290,9 +290,9 @@ function scheduleHomewardRainAlertFor_(personKey, personLabel, targetDate, calen
   const props = PropertiesService.getScriptProperties();
   const key = HOMEWARD_ALERT_PENDING_PREFIX_ + personKey + '_' + Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyyMMdd');
   props.setProperty(key, JSON.stringify({
+    personKey: personKey,
     personLabel: personLabel,
     routeKeys: routeKeys,
-    selfUserId: selfUserId,
     scheduledAt: alertTime.toISOString(),
     homewardTime: homeward.time.toISOString(),
   }));
@@ -331,7 +331,7 @@ function runScheduledHomewardAlerts_(e) {
         if (mmh !== null) rainSpotDetails.push({ label: WEATHER_LOCATIONS_[locKey].label, mmh: mmh });
       });
       const message = buildHomewardRainAlertMessage_(data.personLabel, new Date(data.homewardTime), rainSpotDetails);
-      sendLinePushToRecipients_([data.selfUserId, config.lineUserIdKazushi, config.lineUserIdKikumi], message);
+      sendLinePushToRecipients_(getPersonNotifyRecipients_(config, data.personKey), message);
     } catch (err) {
       Logger.log('下校時雨雲アラートの送信でエラー(' + data.personLabel + '): ' + err.message);
     }
@@ -373,7 +373,6 @@ const MITSUKI_LESSON_ALERT_LEAD_MIN_ = 60;
 
 // ==== 確定版配信時に、朝は予告のみとした習い事それぞれの開始1時間前アラートを予約する ====
 function scheduleMitsukiLessonDepartureAlerts_(targetDate, calendarId) {
-  const config = getWeatherConfig_();
   const announceOnlyEvents = getMitsukiAnnounceOnlyLessonEvents_(targetDate, calendarId);
   if (announceOnlyEvents.length === 0) {
     Logger.log('みつきさん: 予告のみの習い事が無いため、個別出発時刻アラートは予約しませんでした。');
@@ -393,7 +392,6 @@ function scheduleMitsukiLessonDepartureAlerts_(targetDate, calendarId) {
       label: target.label,
       startTime: target.startTime.toISOString(),
       destinationAddress: target.destinationAddress,
-      selfUserId: config.lineUserIdMitsuki,
       scheduledAt: alertTime.toISOString(),
     }));
     ScriptApp.newTrigger('runScheduledMitsukiLessonDepartureAlerts_').timeBased().at(alertTime).create();
@@ -439,7 +437,7 @@ function runScheduledMitsukiLessonDepartureAlerts_(e) {
       const result = calcMitsukiDeparture_(data.label, startTime, travelMinutes, pop, config);
       const riverLine = buildRiverLevelInfoLine_();
       const message = buildMitsukiMessage_(startTime, result, true) + (riverLine ? '\n\n' + riverLine : '');
-      sendLinePushToRecipients_([data.selfUserId, config.lineUserIdKazushi, config.lineUserIdKikumi], message);
+      sendLinePushToRecipients_(getPersonNotifyRecipients_(config, 'MITSUKI'), message);
     } catch (err) {
       Logger.log('みつきさんの個別出発時刻アラートの送信でエラー(' + data.label + '): ' + err.message);
     }
