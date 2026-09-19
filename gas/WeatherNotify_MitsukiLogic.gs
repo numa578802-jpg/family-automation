@@ -1,28 +1,15 @@
 /**
- * みつきさん(前林中学校) 出発時刻リマインドロジック
+ * みつきさん(前林中学校) 通学・出発まわりロジック
  * ------------------------------------------------------------
- * ・朝(正午より前)の時刻付き【みつき】予定を1件目として扱う。無ければ、登校日であれば
- *   通常授業の登校時刻(MITSUKI_DEFAULT_SCHOOL_START、確定値)にフォールバックする。
- * ・正午以降に時刻付きの【みつき】予定(塾・部活動等)のうち、英語・お茶(MITSUKI_LESSON_NAMES_)は
- *   朝の1件目とは別に、それぞれ追加の1件として「出発時刻のお知らせ」を送る(例: 朝の登校とは別に、
- *   下校後いったん帰宅してから夕方の英語(塾)へ改めて出発する日は、朝の分・夕方の分の2件が届く)。
- *   ※「時刻付き予定が1件も無いかどうか」ではなく「朝の時間帯に予定があるかどうか」で
- *   フォールバックの要否を判定する。以前は前者の判定だったため、朝の予定が無く夕方の予定だけ
- *   ある日に登校の案内が送られなくなるバグがあった。
- * ・正午以降の予定のうち、英語・お茶に該当しないもの(部活動等)は「学校からそのまま継続して参加する
- *   予定」であり、家に一度帰ってから改めて出発するわけではないため、その日すでに朝の1件目(実際の
- *   朝の予定、またはフォールバックの登校)が存在する場合は、出発時刻の案内自体を生成しない。
- *   朝の1件目が存在しない日(登校日でもなく、その部活動等が当日唯一の時刻付き予定である場合。
- *   例: 休日に部活動のみがある日)に限り、その予定を「家からの初回の出発」とみなし、これまで通り
- *   出発時刻を計算して案内する。
- * ・移動時間はGASのMapsサービスで自宅→目的地(予定のlocationが未設定なら学校)の自転車移動時間を取得
- *   (みつきさんは自転車通学のため)。
- * ・雨天時(降水確率がしきい値以上)は移動バッファ+10分(初期値)を加算する。
- * ・下校予定時刻(getHomewardDepartureTime_)より後に始まる正午以降の予定のうち、家族プロフィールの
- *   習い事名(英語・お茶)に一致するものは、朝の確定版では出発時刻の詳細を出さず予告文言のみとし、
- *   開始1時間前に個別の使い捨てトリガーで改めて出発時刻のお知らせを送る(下校後いったん帰宅してから
- *   出発するため、朝の時点では正確な出発時刻を確定できないことが多いため)。部活動などそれ以外の
- *   予定は、これまで通り朝の時点でまとめて出発時刻を案内する。
+ * ・登校(自転車通学)の出発時刻お知らせ(項目B): 登校日のみ、朝の時刻付き予定(無ければ
+ *   通常授業の登校時刻 MITSUKI_DEFAULT_SCHOOL_START にフォールバック)を基準に、自転車移動時間・
+ *   降水確率から出発目安を算出する。送迎提案・徒歩提案は出さない。雨天時はカッパの準備を知らせる。
+ * ・出発まわりの通知(項目A、ゆうき・みつき共通ロジックはConfig.gsのgetDepartureNoticeTargets_/
+ *   calcDepartureNoticeDetails_): 非登校日はその日の時刻付き予定すべて、登校日は英語・お茶等
+ *   「家から向かう習い事」(MITSUKI_LESSON_NAMES_)のみを対象に、1予定につき1件を生成する。
+ *   部活のように学校で完結する予定は、登校日には対象外(下校後そのまま学校で参加するため)。
+ * ・移動手段(自転車/車)はConfig.gsのEVENT_TRANSPORT_MODE_KEYWORDS_で予定名から判定する
+ *   (英語=車固定。自転車換算・降水判定・カッパ準備・送迎要否判断は行わない)。
  * ------------------------------------------------------------
  */
 
@@ -35,7 +22,7 @@ function getMitsukiDefaultSchoolStart_() {
     MITSUKI_DEFAULT_SCHOOL_START_FALLBACK_;
 }
 
-// 通常下校時刻(要確認・調整。実際の下校時刻に合わせて後で修正してください)
+// 通常下校時刻(部活が無い日の下校時刻)
 const MITSUKI_DEFAULT_SCHOOL_END_PROP_ = 'MITSUKI_DEFAULT_SCHOOL_END';
 const MITSUKI_DEFAULT_SCHOOL_END_FALLBACK_ = '16:00';
 
@@ -49,30 +36,28 @@ function isMitsukiSchoolDay_(date, calendarId) {
   return isSchoolDay_(date, calendarId, '【みつき】');
 }
 
-// 家族プロフィールに登録されている習い事名。この名称を含む予定のみ、
-// 下校予定時刻より後に始まる場合に「朝は予告のみ・開始1時間前に個別で出発時刻を案内」の対象とする
-// (部活動など、それ以外の予定はこれまで通り朝にまとめて案内する)。
-// 「英語(塾)」のようにカレンダー上は括弧書きが付く場合があるため、isMitsukiActivityRelevant_と
-// 同様に部分一致で判定する(完全一致ではない)。
+// 家族プロフィールに登録されている「家から向かう習い事」の名前。この名称を含む予定は、
+// 登校日でも「出発まわりの通知」(項目A)の対象になる(部活等の学校完結型の予定と違い、
+// いったん帰宅してから改めて家から出発するため)。「英語(塾)」のように括弧書きが付く場合が
+// あるため部分一致で判定する。
 const MITSUKI_LESSON_NAMES_ = ['英語', 'お茶'];
 
 function isMitsukiLessonName_(label) {
   return MITSUKI_LESSON_NAMES_.some(function (name) { return label.indexOf(name) !== -1; });
 }
 
-// 「出発時刻のお知らせ」で朝の1件目(登校/フォールバック)とみなす時間帯の上限。
-// この時刻より前に始まる予定があればそれを朝の1件目とし、無ければ登校日かどうかで
-// フォールバック(登校(通常授業))の要否を決める。この時刻以降に始まる予定は、
-// 朝の1件目とは別に、それぞれ追加の1件として扱う(1件も無ければ朝の分だけになる)。
-const MITSUKI_MORNING_CUTOFF_HOUR_ = 12;
+/**
+ * みつきさんの「登校(自転車通学)」出発時刻お知らせ(項目B)の対象を取得する。
+ * 登校日のみが対象。朝(正午より前)の時刻付き【みつき】予定があればそれを使い、無ければ
+ * 通常授業の登校時刻(MITSUKI_DEFAULT_SCHOOL_START)にフォールバックする。非登校日はnullを返す
+ * (非登校日の予定は項目Aの「出発まわりの通知」で扱う)。
+ * @return {{label:string, startTime:Date, destinationAddress:string}|null}
+ */
+const MITSUKI_MORNING_CUTOFF_HOUR_ = 12; // この時刻より前に始まる予定を「朝の登校」とみなす上限
 
-// ==== 対象日の「基準となる予定」一覧を取得 ====
-// 朝(正午前)の予定は1件目として扱い(無ければ登校日のときだけ登校(通常授業)にフォールバック)、
-// 正午以降の予定はそれぞれ追加の1件として扱う。「時刻付き予定が0件かどうか」ではなく、
-// 「朝の時間帯に予定があるかどうか」でフォールバックの要否を判定する点に注意
-// (以前は時刻付き予定が1件でもあればフォールバックしない実装になっており、
-// 朝の予定が無く夕方の予定だけがある日に、登校の案内が送られなくなるバグがあった)。
-function getMitsukiTargetEvents_(targetDate, calendarId) {
+function getMitsukiSchoolCommuteTarget_(targetDate, calendarId) {
+  if (!isMitsukiSchoolDay_(targetDate, calendarId)) return null;
+
   const dateStr = Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyy-MM-dd');
   const dayStart = new Date(dateStr + 'T00:00:00');
   const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
@@ -81,207 +66,72 @@ function getMitsukiTargetEvents_(targetDate, calendarId) {
 
   const calendar = CalendarApp.getCalendarById(calendarId);
   const events = calendar.getEvents(dayStart, dayEnd);
-  const timedMitsukiEvents = events.filter(function (ev) {
-    return ev.getTitle().indexOf('【みつき】') === 0 && !ev.isAllDayEvent();
+  const morningEvents = events.filter(function (ev) {
+    return ev.getTitle().indexOf('【みつき】') === 0 && !ev.isAllDayEvent() && ev.getStartTime() < morningCutoff;
   });
-  timedMitsukiEvents.sort(function (a, b) { return a.getStartTime() - b.getStartTime(); });
-
-  const formatTime = function (ev) { return Utilities.formatDate(ev.getStartTime(), 'Asia/Tokyo', 'H:mm'); };
-  Logger.log('[みつき出発時刻お知らせ診断] 対象日=' + dateStr + ' 時刻付き【みつき】予定件数=' + timedMitsukiEvents.length +
-    (timedMitsukiEvents.length > 0
-      ? ' / ' + timedMitsukiEvents.map(function (ev) { return '"' + ev.getTitle() + '"(' + formatTime(ev) + '〜)'; }).join(', ')
-      : ''));
-
-  const morningEvents = timedMitsukiEvents.filter(function (ev) { return ev.getStartTime() < morningCutoff; });
-  const afternoonEvents = timedMitsukiEvents.filter(function (ev) { return ev.getStartTime() >= morningCutoff; });
-
-  const targets = [];
+  morningEvents.sort(function (a, b) { return a.getStartTime() - b.getStartTime(); });
 
   if (morningEvents.length > 0) {
     const ev = morningEvents[0];
-    Logger.log('[みつき出発時刻お知らせ診断] 朝(正午前)の予定を1件目として使用: "' + ev.getTitle() + '"(' + formatTime(ev) + '〜)');
-    targets.push({
+    return {
       label: ev.getTitle().replace('【みつき】', ''),
       startTime: ev.getStartTime(),
       destinationAddress: ev.getLocation() || WEATHER_LOCATIONS_.SCHOOL_MITSUKI.address,
-    });
-  } else if (isMitsukiSchoolDay_(targetDate, calendarId)) {
-    Logger.log('[みつき出発時刻お知らせ診断] 朝(正午前)の予定なし。登校日のためフォールバック(登校(通常授業))を1件目として使用');
-    const startTime = new Date(dateStr + 'T' + getMitsukiDefaultSchoolStart_() + ':00');
-    targets.push({
-      label: '登校(通常授業)',
-      startTime: startTime,
-      destinationAddress: WEATHER_LOCATIONS_.SCHOOL_MITSUKI.address,
-    });
-  } else {
-    Logger.log('[みつき出発時刻お知らせ診断] 朝(正午前)の予定なし、かつ登校日でもないため、朝の分は対象外');
+    };
   }
-
-  if (afternoonEvents.length > 0) {
-    // 下校予定時刻より後に始まる習い事(英語・お茶)かどうかの判定に使うため、ここで1回だけ算出する。
-    // 英語・お茶自体は「学校から家に向かう予定」ではない(いったん帰宅してから家庭発で出発する)ため、
-    // 下校予定時刻の算出対象からは除外する(MITSUKI_LESSON_NAMES_)。
-    const homeward = getHomewardDepartureTime_(targetDate, calendarId, '【みつき】', getMitsukiDefaultSchoolEnd_(), MITSUKI_LESSON_NAMES_);
-
-    // 朝の1件目(実際の朝の予定、またはフォールバックの登校)が既にあるかどうか。
-    // 英語・お茶に該当しない予定(部活動等)は、朝の1件目が既にある日は「学校からそのまま継続」と
-    // みなして出発時刻の案内自体を出さない。無い日(その予定が当日唯一の時刻付き予定である場合)に
-    // 限り、家からの初回の出発とみなして案内する。
-    let hasDepartureAnchor = targets.length > 0;
-
-    afternoonEvents.forEach(function (ev) {
-      const label = ev.getTitle().replace('【みつき】', '');
-      const isLesson = isMitsukiLessonName_(label);
-
-      if (!isLesson) {
-        if (hasDepartureAnchor) {
-          Logger.log('[みつき出発時刻お知らせ診断] 正午以降の予定は学校からそのまま継続する予定のため出発時刻案内をスキップ(既に朝の案内があるため): "' +
-            ev.getTitle() + '"(' + formatTime(ev) + '〜)');
-          return;
-        }
-        Logger.log('[みつき出発時刻お知らせ診断] 朝の案内が無いため、正午以降の予定を家からの初回の出発として1件目として使用: "' +
-          ev.getTitle() + '"(' + formatTime(ev) + '〜)');
-        targets.push({
-          label: label,
-          startTime: ev.getStartTime(),
-          destinationAddress: ev.getLocation() || WEATHER_LOCATIONS_.SCHOOL_MITSUKI.address,
-        });
-        hasDepartureAnchor = true;
-        return;
-      }
-
-      const isAfterHomeward = !!homeward && ev.getStartTime() > homeward.time;
-      if (isAfterHomeward) {
-        Logger.log('[みつき出発時刻お知らせ診断] 正午以降の予定を追加の1件として使用(下校予定時刻より後の習い事のため、朝は予告のみ・開始1時間前に個別案内): "' +
-          ev.getTitle() + '"(' + formatTime(ev) + '〜)');
-      } else {
-        Logger.log('[みつき出発時刻お知らせ診断] 正午以降の予定を追加の1件として使用(下校予定時刻より前の習い事のため、通常通り朝に出発時刻を案内): "' +
-          ev.getTitle() + '"(' + formatTime(ev) + '〜)');
-      }
-      targets.push({
-        label: label,
-        startTime: ev.getStartTime(),
-        destinationAddress: ev.getLocation() || WEATHER_LOCATIONS_.SCHOOL_MITSUKI.address,
-        announceOnly: isAfterHomeward,
-      });
-    });
-  }
-
-  Logger.log('[みつき出発時刻お知らせ診断] 最終的な配信対象件数=' + targets.length);
-  return targets;
-}
-
-// ==== 朝は予告のみとした習い事(英語・お茶)の一覧を取得(開始1時間前の個別出発時刻案内で使用) ====
-function getMitsukiAnnounceOnlyLessonEvents_(targetDate, calendarId) {
-  return getMitsukiTargetEvents_(targetDate, calendarId).filter(function (target) {
-    return target.announceOnly;
-  });
-}
-
-/**
- * みつきさんの出発時刻リマインドを、対象予定ごとに算出する(気象API・Mapsを実際に呼び出す)。
- * @return {Array<Object>} calcMitsukiDeparture_の戻り値の配列。対象予定が無い日は空配列。
- */
-function decideMitsukiReminders_(targetDate, calendarId) {
-  const targets = getMitsukiTargetEvents_(targetDate, calendarId);
-  const config = getWeatherConfig_();
-  return targets.map(function (target) {
-    if (target.announceOnly) {
-      // 下校予定時刻より後の習い事(英語・お茶)は、朝の時点では予告のみ。
-      // 出発時刻の詳細は開始1時間前の個別案内(runScheduledMitsukiLessonDepartureAlerts_)で算出する。
-      return { label: target.label, startTime: target.startTime, announceOnly: true };
-    }
-
-    const travelMinutes = getBikingTravelMinutes_(WEATHER_LOCATIONS_.HOME.address, target.destinationAddress);
-
-    let pop = null;
-    try {
-      pop = getPrecipitationProbabilityAt_(target.startTime);
-    } catch (e) {
-      Logger.log('降水確率の取得でエラー(みつき): ' + e.message);
-    }
-
-    return calcMitsukiDeparture_(target.label, target.startTime, travelMinutes, pop, config);
-  });
-}
-
-/**
- * 予定開始時刻・移動時間・降水確率から出発時刻を算出する純粋関数。
- * ネットワークアクセスを行わないため、テストハーネスからモックデータで検証できる。
- */
-function calcMitsukiDeparture_(label, startTime, travelMinutes, pop, config) {
-  const isRaining = pop !== null && pop >= config.popThreshold;
-  const bufferMin = isRaining ? config.mitsukiRainBufferMin : 0;
-  const departureTime = new Date(startTime.getTime() - (travelMinutes + bufferMin) * 60 * 1000);
-
   return {
-    label: label,
-    startTime: startTime,
-    departureTime: departureTime,
-    travelMinutes: travelMinutes,
-    isRaining: isRaining,
-    bufferMin: bufferMin,
-    pop: pop,
-    usedPop: pop !== null,
+    label: '登校(通常授業)',
+    startTime: new Date(dateStr + 'T' + getMitsukiDefaultSchoolStart_() + ':00'),
+    destinationAddress: WEATHER_LOCATIONS_.SCHOOL_MITSUKI.address,
   };
 }
 
-// ==== 対象の予定が「部活動」または「お茶」に該当するか(送迎提案の対象判定用) ====
-function isMitsukiActivityRelevant_(title) {
-  return title.indexOf('部') !== -1 || title.indexOf('お茶') !== -1;
+/**
+ * みつきさんの登校(自転車通学)の出発時刻お知らせを算出する(気象API・Mapsを実際に呼び出す)。
+ * 送迎要否・徒歩提案は判定しない(buildMitsukiSchoolCommuteMessage_側でも参照しない)。
+ * @return {Object|null} 対象日が登校日でなければnull。
+ */
+function decideMitsukiSchoolCommute_(targetDate, calendarId) {
+  const target = getMitsukiSchoolCommuteTarget_(targetDate, calendarId);
+  if (!target) return null;
+
+  const config = getWeatherConfig_();
+  const travelMinutes = getBikingTravelMinutes_(WEATHER_LOCATIONS_.HOME.address, target.destinationAddress);
+  let pop = null;
+  try {
+    pop = getPrecipitationProbabilityAt_(target.startTime);
+  } catch (e) {
+    Logger.log('降水確率の取得でエラー(みつき登校): ' + e.message);
+  }
+  const bike = calcBikeDeparture_(target.startTime, travelMinutes, pop, config);
+
+  return {
+    label: target.label,
+    startTime: target.startTime,
+    departureTime: bike.departureTime,
+    travelMinutes: bike.travelMinutes,
+    isRaining: bike.isRaining,
+    bufferMin: bike.bufferMin,
+    pop: bike.pop,
+    usedPop: bike.usedPop,
+  };
 }
 
 /**
- * みつきさんの部活動/お茶の日に、行き・帰りの雨天状況から「徒歩」「送迎」を提案する(新規機能)。
- * 対象日に部活動/お茶の時刻付き予定が無ければnullを返す(その日は送迎提案の対象外)。
- * 行き・帰りとも、時間的に離れていることが多いため降水確率のみで判定する(ナウキャストは使わない)。
- * @return {Object|null} { label, mode: '徒歩'|'送迎', goTime, returnTime, go: {...}, ret: {...} }
+ * みつきさんの「出発まわりの通知」(項目A)対象を算出する(気象API・Mapsを実際に呼び出す)。
+ * @return {Array<Object>} calcDepartureNoticeDetails_の戻り値の配列。対象予定が無い日は空配列。
  */
-function decideMitsukiEscort_(targetDate, calendarId) {
+function decideMitsukiDepartureNotices_(targetDate, calendarId) {
+  const isSchool = isMitsukiSchoolDay_(targetDate, calendarId);
+  const targets = getDepartureNoticeTargets_(targetDate, calendarId, '【みつき】', isSchool,
+    MITSUKI_LESSON_NAMES_, WEATHER_LOCATIONS_.SCHOOL_MITSUKI.address);
+  if (targets.length === 0) return [];
+
   const config = getWeatherConfig_();
-  const dateStr = Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyy-MM-dd');
-  const dayStart = new Date(dateStr + 'T00:00:00');
-  const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
-
-  const calendar = CalendarApp.getCalendarById(calendarId);
-  const events = calendar.getEvents(dayStart, dayEnd);
-  const relevantEvents = events.filter(function (ev) {
-    return ev.getTitle().indexOf('【みつき】') === 0 && !ev.isAllDayEvent() && isMitsukiActivityRelevant_(ev.getTitle());
-  });
-  if (relevantEvents.length === 0) return null; // 部活動/お茶の予定が無い日は対象外
-
-  relevantEvents.sort(function (a, b) { return a.getStartTime() - b.getStartTime(); });
-  const target = relevantEvents[0];
-  const label = target.getTitle().replace('【みつき】', '');
-  const goTime = target.getStartTime();
-
+  // 英語・お茶自体は「学校から家に向かう予定」ではない(いったん帰宅してから家庭発で出発する)ため、
+  // 帰り予定時刻の算出対象からは除外する(MITSUKI_LESSON_NAMES_)。
   const homeward = getHomewardDepartureTime_(targetDate, calendarId, '【みつき】', getMitsukiDefaultSchoolEnd_(), MITSUKI_LESSON_NAMES_);
-  const returnTime = homeward ? homeward.time : target.getEndTime();
-
-  let goPop = null;
-  try {
-    goPop = getPrecipitationProbabilityAt_(goTime);
-  } catch (e) {
-    Logger.log('降水確率の取得でエラー(みつき送迎・行き): ' + e.message);
-  }
-  const go = evaluateRainCondition_(goPop, [], config);
-
-  let returnPop = null;
-  try {
-    returnPop = getPrecipitationProbabilityAt_(returnTime);
-  } catch (e) {
-    Logger.log('降水確率の取得でエラー(みつき送迎・帰り): ' + e.message);
-  }
-  const ret = evaluateRainCondition_(returnPop, [], config);
-
-  const escortNeeded = go.rainy || ret.rainy;
-
-  return {
-    label: label,
-    mode: escortNeeded ? '送迎' : '徒歩',
-    goTime: goTime,
-    returnTime: returnTime,
-    go: go,
-    ret: ret,
-  };
+  return targets.map(function (target) {
+    return calcDepartureNoticeDetails_(target, WEATHER_LOCATIONS_.HOME.address, homeward, config);
+  });
 }

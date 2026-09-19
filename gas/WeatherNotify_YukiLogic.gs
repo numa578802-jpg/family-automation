@@ -15,9 +15,9 @@
 
 const YUKI_COMMUTE_HOUR_ = 7; // 登校時間帯の代表時刻(この時刻のPoPを参照する)
 
-// 通常下校時刻(要確認・調整。実際の下校時刻に合わせて後で修正してください)
+// 通常下校時刻(部活が無い日の下校時刻。確認済みの値)
 const YUKI_DEFAULT_SCHOOL_END_PROP_ = 'YUKI_DEFAULT_SCHOOL_END';
-const YUKI_DEFAULT_SCHOOL_END_FALLBACK_ = '16:00';
+const YUKI_DEFAULT_SCHOOL_END_FALLBACK_ = '17:00';
 
 function getYukiDefaultSchoolEnd_() {
   return PropertiesService.getScriptProperties().getProperty(YUKI_DEFAULT_SCHOOL_END_PROP_) ||
@@ -28,6 +28,10 @@ function getYukiDefaultSchoolEnd_() {
 function isYukiSchoolDay_(date, calendarId) {
   return isSchoolDay_(date, calendarId, '【ゆうき】');
 }
+
+// 家族プロフィール上、ゆうきさんに該当する「家から向かう習い事」は現状無いため空配列。
+// 該当するものが出てきた場合はここにキーワードを追加する(みつきさんのMITSUKI_LESSON_NAMES_と同じ考え方)。
+const YUKI_LESSON_NAMES_ = [];
 
 /**
  * ゆうきさんのバス/自転車判定を行う(気象APIを実際に呼び出す)。朝・帰り両方を判定する。
@@ -105,4 +109,23 @@ function decideYukiTransportFromData_(pop, rainSpotDetails, config) {
     usedPop: r.usedPop,
     usedNowcast: r.usedNowcast,
   };
+}
+
+/**
+ * ゆうきさんの「出発まわりの通知」(項目A)対象を算出する(気象API・Mapsを実際に呼び出す)。
+ * 非登校日の時刻付き予定(部活等)が対象。登校日はYUKI_LESSON_NAMES_が空のため対象が無い
+ * (=このまま常に空配列を返す。将来、家から向かう習い事が増えた場合はYUKI_LESSON_NAMES_に追加する)。
+ * @return {Array<Object>} calcDepartureNoticeDetails_の戻り値の配列。対象予定が無い日は空配列。
+ */
+function decideYukiDepartureNotices_(targetDate, calendarId) {
+  const isSchool = isYukiSchoolDay_(targetDate, calendarId);
+  const targets = getDepartureNoticeTargets_(targetDate, calendarId, '【ゆうき】', isSchool,
+    YUKI_LESSON_NAMES_, WEATHER_LOCATIONS_.SCHOOL_YUKI.address);
+  if (targets.length === 0) return [];
+
+  const config = getWeatherConfig_();
+  const homeward = getHomewardDepartureTime_(targetDate, calendarId, '【ゆうき】', getYukiDefaultSchoolEnd_(), YUKI_LESSON_NAMES_);
+  return targets.map(function (target) {
+    return calcDepartureNoticeDetails_(target, WEATHER_LOCATIONS_.HOME.address, homeward, config);
+  });
 }

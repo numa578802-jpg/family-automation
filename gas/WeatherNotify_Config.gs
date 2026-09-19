@@ -28,9 +28,10 @@
  *   YUKI_RAIN_INTENSITY_THRESHOLD_MMH  … バス推奨とする雨雲の降水強度しきい値(mm/h、デフォルト1)
  *   MITSUKI_RAIN_BUFFER_MIN            … 雨天時に追加する移動バッファ(分、デフォルト10)
  *   MITSUKI_DEFAULT_TRAVEL_MIN         … 自転車移動時間が取得できない場合のフォールバック値(分、デフォルト15)
- *   YUKI_DEFAULT_SCHOOL_END            … ゆうきさんの通常下校時刻(デフォルト16:00、仮値。要確認)
- *   MITSUKI_DEFAULT_SCHOOL_END         … みつきさんの通常下校時刻(デフォルト16:00、仮値。要確認)
- *   HOMEWARD_ALERT_LEAD_MIN            … 「下校時 雨雲通過予報」を下校予定時刻の何分前に送るか(デフォルト30)
+ *   YUKI_DEFAULT_SCHOOL_END            … ゆうきさんの通常下校時刻(部活が無い日の下校時刻。デフォルト17:00)
+ *   MITSUKI_DEFAULT_SCHOOL_END         … みつきさんの通常下校時刻(部活が無い日の下校時刻。デフォルト16:00)
+ *   HOMEWARD_ALERT_LEAD_MIN            … 「帰りの雨雲通過予報」を帰り予定時刻の何分前に送るか(デフォルト30)
+ *   CAR_PICKUP_ALERT_LEAD_MIN          … 車送迎の直前アラートを、予定開始の何分前に送るか(デフォルト60)
  * ------------------------------------------------------------
  */
 
@@ -95,6 +96,35 @@ const NON_SCHOOL_DAY_KEYWORDS_ = [
   '夏休み', '冬休み', '春休み', '休校', '学校閉庁日', '創立記念日', '振替休日',
 ];
 
+// ==== 国民の祝日の判定元(Googleが公開している「日本の祝日」カレンダー) ====
+// 取得に失敗した場合(権限エラー・一時的な障害等)のみ、家族スケジュール自動登録.gsの
+// JAPAN_HOLIDAYS_(内閣府公表の静的リスト、2026年4月〜2027年3月分)にフォールバックする。
+// フォールバックが発生したことは1回の実行につき1回だけ警告ログに出す(japanHolidayFallbackWarned_)。
+const JAPAN_HOLIDAY_CALENDAR_ID_ = 'ja.japanese#holiday@group.v.calendar.google.com';
+let japanHolidayFallbackWarned_ = false;
+
+// ==== 対象日の祝日名を取得(祝日でなければnull)。Googleの祝日カレンダーを優先し、失敗時のみ静的リストを使う ====
+function getJapanHolidayName_(dateStr, verbose) {
+  try {
+    const calendar = CalendarApp.getCalendarById(JAPAN_HOLIDAY_CALENDAR_ID_);
+    const date = new Date(dateStr + 'T00:00:00');
+    const events = calendar.getEventsForDay(date);
+    if (verbose) {
+      Logger.log('[isSchoolDay_診断] Googleの祝日カレンダー照会結果: ' +
+        (events.length > 0 ? events.map(function (ev) { return ev.getTitle(); }).join('、') : '(該当イベントなし)'));
+    }
+    return events.length > 0 ? events[0].getTitle() : null;
+  } catch (e) {
+    if (!japanHolidayFallbackWarned_) {
+      Logger.log('Googleの祝日カレンダー(' + JAPAN_HOLIDAY_CALENDAR_ID_ + ')の取得に失敗したため、' +
+        '静的リスト(家族スケジュール自動登録.gsのJAPAN_HOLIDAYS_)にフォールバックします: ' + e.message);
+      japanHolidayFallbackWarned_ = true;
+    }
+    const holidayMap = buildHolidayNameMap_(); // 既存スクリプト(家族スケジュール自動登録.gs)の関数を再利用(フォールバック専用)
+    return holidayMap[dateStr] || null;
+  }
+}
+
 // ==== 対象日が指定した家族(namePrefix: '【ゆうき】' or '【みつき】')の登校日か判定 ====
 // 平日 かつ 国民の祝日でない かつ カレンダー上に長期休み等を示す終日予定が無いこと、を条件とする。
 // verbose=trueを渡すと、どの条件で除外されたか(該当した場合はイベントのタイトルも)をログに出す診断モード。
@@ -109,9 +139,9 @@ function isSchoolDay_(date, calendarId, namePrefix, verbose) {
     return false; // 土日
   }
 
-  const holidayMap = buildHolidayNameMap_(); // 既存スクリプト(家族スケジュール自動登録.gs)の関数を再利用
-  if (holidayMap[dateStr]) {
-    if (verbose) Logger.log('[isSchoolDay_診断] → 国民の祝日(' + holidayMap[dateStr] + ')のため登校日ではないと判定');
+  const holidayName = getJapanHolidayName_(dateStr, verbose);
+  if (holidayName) {
+    if (verbose) Logger.log('[isSchoolDay_診断] → 国民の祝日(' + holidayName + ')のため登校日ではないと判定');
     return false; // 国民の祝日
   }
 
@@ -196,17 +226,18 @@ function evaluateRainCondition_(pop, rainSpotDetails, config) {
  * 対象日の「学校(または活動場所)から家に向かって出発する時刻」を、ゆうき・みつき共通で算出する。
  * ルール:
  *   1. 対象日に時刻付きの【namePrefix】予定(部活動等、学校発の予定)があれば、最も遅く終わる予定の
- *      終了時刻を候補にする。ただし予定名がexcludeLabelKeywordsのいずれかを含む場合は候補から除外する
+ *      終了時刻を採用する。ただし予定名がexcludeLabelKeywordsのいずれかを含む場合は候補から除外する
  *      (英語・お茶のような、いったん家に帰ってから改めて家庭から出発する予定は、
  *      「学校から家に向かう時刻」の計算には含めない。含めてしまうと、実際の下校時刻より大幅に遅い
  *      時刻が「下校予定」として算出されてしまい、下校時雨雲アラートの発火予約が大きくずれるバグになる)。
- *   2. 対象日が登校日であれば、defaultTimeStr(通常の下校時刻)も候補にする。
- *   3. 候補が複数ある場合は、より遅い時刻(＝より現実的に家へ向かう時刻)を採用する。
- *   4. 候補が1つも無い場合(登校日でもなく、予定も無い)はnullを返す。
+ *   2. 該当する予定が1件も無い場合のみ、対象日が登校日であればdefaultTimeStr(通常の下校時刻)を採用する。
+ *      (予定があるのに既定時刻と比較して遅い方を採る、という処理は行わない。部活が既定時刻より早く
+ *      終わる日は、その部活の終了時刻をそのまま採用する)
+ *   3. 予定も無く、登校日でもない場合はnullを返す。
  * @param {Date} targetDate 対象日
  * @param {string} calendarId 家族共有カレンダーのID
  * @param {string} namePrefix '【ゆうき】' または '【みつき】'
- * @param {string} defaultTimeStr 通常下校時刻(例: '16:00')
+ * @param {string} defaultTimeStr 通常下校時刻(例: '17:00')
  * @param {string[]} [excludeLabelKeywords] この文字列のいずれかを予定名に含む場合、候補から除外する(部分一致)
  * @return {{time: Date, source: 'calendar'|'default', label: string}|null}
  */
@@ -234,19 +265,186 @@ function getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultTi
     Logger.log('下校時刻算出中のカレンダー確認でエラー: ' + e.message);
   }
 
-  const isSchool = isSchoolDay_(targetDate, calendarId, namePrefix);
-  const defaultTime = isSchool ? new Date(dateStr + 'T' + defaultTimeStr + ':00') : null;
-
-  if (latestEventEnd && defaultTime) {
-    return latestEventEnd.getTime() >= defaultTime.getTime()
-      ? { time: latestEventEnd, source: 'calendar', label: latestEventLabel }
-      : { time: defaultTime, source: 'default', label: '通常下校' };
-  }
   if (latestEventEnd) {
     return { time: latestEventEnd, source: 'calendar', label: latestEventLabel };
   }
-  if (defaultTime) {
-    return { time: defaultTime, source: 'default', label: '通常下校' };
+
+  const isSchool = isSchoolDay_(targetDate, calendarId, namePrefix);
+  if (isSchool) {
+    return { time: new Date(dateStr + 'T' + defaultTimeStr + ':00'), source: 'default', label: '通常下校' };
   }
   return null; // 登校日でもなく、時刻付きの予定も無い日
+}
+
+/**
+ * 予定名(キーワード部分一致)→移動手段の対応表(項目A-2)。
+ * 一致しなければ既定の'BIKE'(自転車)。'CAR'は自転車換算・降水判定・カッパ準備・送迎要否判断を一切行わず、
+ * 常に車での送迎を前提とした「連絡リマインド」型の文面になる(buildDepartureNoticeMessage_参照)。
+ * 「英語(塾)」のように括弧書きが付く場合があるため部分一致で判定する。
+ */
+const EVENT_TRANSPORT_MODE_KEYWORDS_ = {
+  '英語': 'CAR',
+};
+
+function getEventTransportMode_(label) {
+  const keys = Object.keys(EVENT_TRANSPORT_MODE_KEYWORDS_);
+  for (let i = 0; i < keys.length; i++) {
+    if (label.indexOf(keys[i]) !== -1) return EVENT_TRANSPORT_MODE_KEYWORDS_[keys[i]];
+  }
+  return 'BIKE';
+}
+
+// ==== 車送迎の直前アラート(連絡リマインド)を、予定開始の何分前に送るか(項目A-2) ====
+const CAR_PICKUP_ALERT_LEAD_MIN_PROP_ = 'CAR_PICKUP_ALERT_LEAD_MIN';
+const CAR_PICKUP_ALERT_LEAD_MIN_FALLBACK_ = 60;
+
+function getCarPickupAlertLeadMin_() {
+  const value = PropertiesService.getScriptProperties().getProperty(CAR_PICKUP_ALERT_LEAD_MIN_PROP_);
+  const n = Number(value);
+  return value && !isNaN(n) ? n : CAR_PICKUP_ALERT_LEAD_MIN_FALLBACK_;
+}
+
+/**
+ * 「出発まわりの通知」(項目A)の対象予定一覧を、ゆうき・みつき共通で取得する。
+ * 対象:
+ *   - 非登校日(土日祝・長期休暇等): その日の時刻付き【namePrefix】予定すべて
+ *     (部活・習い事の区別なく、学校を経由しない「家からの予定」として扱う)
+ *   - 登校日: householdLessonKeywordsに一致する予定のみ(英語・お茶等、家から向かう習い事)。
+ *     部活のように学校で完結する予定は対象外(登校自体の通知は別関数で扱う。項目B/C参照)。
+ * @param {Date} targetDate 対象日
+ * @param {string} calendarId 家族共有カレンダーのID
+ * @param {string} namePrefix '【ゆうき】' または '【みつき】'
+ * @param {boolean} isSchoolDayFlag 対象日が登校日かどうか(isSchoolDay_の結果をそのまま渡す)
+ * @param {string[]} householdLessonKeywords 登校日に対象とする、家から向かう習い事名のキーワード一覧(部分一致)
+ * @param {string} defaultDestinationAddress 予定にlocationが無い場合の目的地(通常は学校の住所)
+ * @return {Array<{label:string, startTime:Date, destinationAddress:string, mode:'CAR'|'BIKE'}>}
+ */
+function getDepartureNoticeTargets_(targetDate, calendarId, namePrefix, isSchoolDayFlag, householdLessonKeywords, defaultDestinationAddress) {
+  const dateStr = Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyy-MM-dd');
+  const dayStart = new Date(dateStr + 'T00:00:00');
+  const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+
+  const calendar = CalendarApp.getCalendarById(calendarId);
+  const events = calendar.getEvents(dayStart, dayEnd);
+  const timedEvents = events.filter(function (ev) {
+    return ev.getTitle().indexOf(namePrefix) === 0 && !ev.isAllDayEvent();
+  });
+  timedEvents.sort(function (a, b) { return a.getStartTime() - b.getStartTime(); });
+
+  const isHouseholdLesson = function (label) {
+    return householdLessonKeywords.some(function (kw) { return label.indexOf(kw) !== -1; });
+  };
+
+  const targets = [];
+  timedEvents.forEach(function (ev) {
+    const label = ev.getTitle().replace(namePrefix, '');
+    const included = isSchoolDayFlag ? isHouseholdLesson(label) : true;
+    Logger.log('[出発まわりの通知診断] ' + namePrefix + ' "' + label + '"(' +
+      Utilities.formatDate(ev.getStartTime(), 'Asia/Tokyo', 'H:mm') + '〜): ' +
+      (isSchoolDayFlag
+        ? (included ? '登校日だが家庭発の習い事に該当するため対象' : '登校日かつ学校完結型の予定のため対象外')
+        : '非登校日のため対象') );
+    if (!included) return;
+    targets.push({
+      label: label,
+      startTime: ev.getStartTime(),
+      destinationAddress: ev.getLocation() || defaultDestinationAddress,
+      mode: getEventTransportMode_(label),
+    });
+  });
+  return targets;
+}
+
+/**
+ * 予定開始時刻・自転車移動時間・降水確率から出発時刻を算出する純粋関数(自転車移動共通部分)。
+ * ネットワークアクセスを行わないため、テストハーネスからモックデータで検証できる。
+ * みつきさんの登校(自転車通学、項目B)・出発まわりの通知(項目A・BIKEモード)の両方で使う。
+ */
+function calcBikeDeparture_(startTime, travelMinutes, pop, config) {
+  const isRaining = pop !== null && pop >= config.popThreshold;
+  const bufferMin = isRaining ? config.mitsukiRainBufferMin : 0;
+  const departureTime = new Date(startTime.getTime() - (travelMinutes + bufferMin) * 60 * 1000);
+  return {
+    departureTime: departureTime,
+    travelMinutes: travelMinutes,
+    isRaining: isRaining,
+    bufferMin: bufferMin,
+    pop: pop,
+    usedPop: pop !== null,
+  };
+}
+
+/**
+ * 出発まわりの通知(項目A)1件分の詳細を、気象データ・移動時間・送迎判定用の降水確率から算出する純粋関数。
+ * ネットワークアクセスを行わないため、テストハーネスからモックデータで検証できる。
+ * CARモード(項目A-2)はtravelMinutes/pop/returnPopを一切使わない(自転車換算・降水判定・
+ * カッパ準備・送迎要否判断は行わない)。
+ * @param {Object} target getDepartureNoticeTargets_の要素({label, startTime, mode, ...})
+ * @param {number} travelMinutes 自転車移動時間(分。CARモードでは無視される)
+ * @param {number|null} pop 予定開始時刻の降水確率(%。CARモードでは無視される)
+ * @param {number|null} returnPop 帰り予定時刻の降水確率(%。CARモードでは無視される)
+ * @param {{time:Date,source:string,label:string}|null} homeward その日の帰り予定(getHomewardDepartureTime_の結果)
+ * @param {Object} config getWeatherConfig_()の戻り値
+ */
+function calcDepartureNoticeDetailsFromData_(target, travelMinutes, pop, returnPop, homeward, config) {
+  if (target.mode === 'CAR') {
+    return {
+      label: target.label,
+      mode: 'CAR',
+      startTime: target.startTime,
+      pickupTime: homeward ? homeward.time : null,
+    };
+  }
+
+  const bike = calcBikeDeparture_(target.startTime, travelMinutes, pop, config);
+  const go = evaluateRainCondition_(pop, [], config);
+  const ret = evaluateRainCondition_(returnPop, [], config);
+  const escortNeeded = go.rainy || ret.rainy;
+
+  return {
+    label: target.label,
+    mode: 'BIKE',
+    startTime: target.startTime,
+    departureTime: bike.departureTime,
+    travelMinutes: bike.travelMinutes,
+    isRaining: bike.isRaining,
+    bufferMin: bike.bufferMin,
+    pop: bike.pop,
+    usedPop: bike.usedPop,
+    homewardTime: homeward ? homeward.time : null,
+    escortNeeded: escortNeeded,
+    go: go,
+    ret: ret,
+  };
+}
+
+/**
+ * 出発まわりの通知(項目A)1件分の詳細を算出する(気象API・Mapsを実際に呼び出す)。
+ * 実際のデータ取得を行い、純粋関数calcDepartureNoticeDetailsFromData_に渡すだけの薄いラッパー。
+ * @param {Object} target getDepartureNoticeTargets_の要素
+ * @param {string} homeAddress 自宅住所
+ * @param {{time:Date,source:string,label:string}|null} homeward その日の帰り予定(getHomewardDepartureTime_の結果)
+ * @param {Object} config getWeatherConfig_()の戻り値
+ */
+function calcDepartureNoticeDetails_(target, homeAddress, homeward, config) {
+  if (target.mode === 'CAR') {
+    return calcDepartureNoticeDetailsFromData_(target, null, null, null, homeward, config);
+  }
+
+  const travelMinutes = getBikingTravelMinutes_(homeAddress, target.destinationAddress);
+  let pop = null;
+  try {
+    pop = getPrecipitationProbabilityAt_(target.startTime);
+  } catch (e) {
+    Logger.log('降水確率の取得でエラー(出発まわりの通知・' + target.label + '): ' + e.message);
+  }
+  let returnPop = null;
+  if (homeward) {
+    try {
+      returnPop = getPrecipitationProbabilityAt_(homeward.time);
+    } catch (e) {
+      Logger.log('降水確率の取得でエラー(出発まわりの通知・帰り・' + target.label + '): ' + e.message);
+    }
+  }
+  return calcDepartureNoticeDetailsFromData_(target, travelMinutes, pop, returnPop, homeward, config);
 }

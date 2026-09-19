@@ -35,19 +35,21 @@ const LINE_REPLY_URL_ = 'https://api.line.me/v2/bot/message/reply';
 
 // ==== LINEへpushメッセージを送信(DRY_RUN時は送信せずログのみ) ====
 // accessTokenを省略した場合は、検証・デバッグ用チャネル(LINE_CHANNEL_ACCESS_TOKEN)を使う。
-function sendLinePushMessage_(userId, text, accessToken) {
+// channelLabelを渡すと、全ログ行の先頭に「[ゆうき用]」のように前置する(項目F)。
+function sendLinePushMessage_(userId, text, accessToken, channelLabel) {
   const config = getWeatherConfig_();
+  const logPrefix = channelLabel ? '[' + channelLabel + '] ' : '';
   if (!userId) {
-    Logger.log('userId未登録のため送信をスキップしました。メッセージ: ' + text);
+    Logger.log(logPrefix + 'userId未登録のため送信をスキップしました。');
     return;
   }
   if (config.dryRun) {
-    Logger.log('[DRY_RUN] LINE送信をスキップ(実際には送信しません) 宛先: ' + userId + '\n本文:\n' + text);
+    Logger.log(logPrefix + '[DRY_RUN] LINE送信をスキップ(実際には送信しません) 宛先: ' + userId + '\n本文:\n' + text);
     return;
   }
   const token = accessToken || config.lineChannelAccessToken;
   if (!token) {
-    Logger.log('LINEチャネルアクセストークンが未設定のため送信できません(宛先: ' + userId + ')。');
+    Logger.log(logPrefix + 'LINEチャネルアクセストークンが未設定のため送信できません(宛先: ' + userId + ')。');
     return;
   }
 
@@ -62,20 +64,27 @@ function sendLinePushMessage_(userId, text, accessToken) {
     payload: JSON.stringify(payload),
     muteHttpExceptions: true,
   });
-  if (response.getResponseCode() !== 200) {
-    Logger.log('LINE push送信エラー(' + response.getResponseCode() + '): ' + response.getContentText());
+  if (response.getResponseCode() === 200) {
+    Logger.log(logPrefix + '送信成功(200) 宛先: ' + userId);
+  } else {
+    Logger.log(logPrefix + '送信失敗(' + response.getResponseCode() + ') 宛先: ' + userId + ': ' + response.getContentText());
   }
 }
 
 // ==== 同一メッセージを複数の宛先へ送信する(本人+CC等)。空欄・重複userIdは自動的にスキップする ====
-// recipientsは [{userId, accessToken}, ...] の配列。宛先ごとに異なるチャネル(アクセストークン)を
+// recipientsは [{userId, accessToken, channelLabel}, ...] の配列。宛先ごとに異なるチャネル(アクセストークン)を
 // 指定できる(getPersonNotifyRecipients_を参照)。
 function sendLinePushToRecipients_(recipients, text) {
   const seen = {};
   recipients.forEach(function (recipient) {
-    if (!recipient || !recipient.userId || seen[recipient.userId]) return;
+    if (!recipient || !recipient.userId) return;
+    if (seen[recipient.userId]) {
+      Logger.log((recipient.channelLabel ? '[' + recipient.channelLabel + '] ' : '') +
+        '同一userIdへ既に(別の宛先枠として)送信済みのため、このチャネルからの送信はスキップしました。');
+      return;
+    }
     seen[recipient.userId] = true;
-    sendLinePushMessage_(recipient.userId, text, recipient.accessToken);
+    sendLinePushMessage_(recipient.userId, text, recipient.accessToken, recipient.channelLabel);
   });
 }
 
@@ -83,12 +92,12 @@ function sendLinePushToRecipients_(recipients, text) {
 //      それぞれの専用チャネル経由で返す ====
 function getPersonNotifyRecipients_(config, personKey) {
   const selfEntry = personKey === 'YUKI'
-    ? { userId: config.lineUserIdYuki, accessToken: config.lineChannelAccessTokenYuki }
-    : { userId: config.lineUserIdMitsuki, accessToken: config.lineChannelAccessTokenMitsuki };
+    ? { userId: config.lineUserIdYuki, accessToken: config.lineChannelAccessTokenYuki, channelLabel: 'ゆうき用' }
+    : { userId: config.lineUserIdMitsuki, accessToken: config.lineChannelAccessTokenMitsuki, channelLabel: 'みつき用' };
   return [
     selfEntry,
-    { userId: config.lineUserIdKazushi, accessToken: config.lineChannelAccessTokenKazushi },
-    { userId: config.lineUserIdKikumi, accessToken: config.lineChannelAccessTokenKikumi },
+    { userId: config.lineUserIdKazushi, accessToken: config.lineChannelAccessTokenKazushi, channelLabel: '一志用' },
+    { userId: config.lineUserIdKikumi, accessToken: config.lineChannelAccessTokenKikumi, channelLabel: 'きくみ用' },
   ];
 }
 
@@ -134,6 +143,43 @@ function resolveLineChannel_(props, givenToken) {
   const defaultChannel = LINE_CHANNELS_[0];
   if (!props.getProperty(defaultChannel.webhookTokenProp)) return defaultChannel;
   return null;
+}
+
+/**
+ * 5チャネル分(検証用+配信先4人分)の当月メッセージ消費数をログに出す(項目G)。
+ * LINE Messaging APIの「メッセージ通数の取得」(GET /v2/bot/message/quota/consumption)を、
+ * 各チャネルのアクセストークンで呼び出す。GASエディタから手動実行することを想定している。
+ * 【注意】この値はLINE側の反映に最大1日程度のタイムラグがあるとされており、リアルタイムの
+ * 正確な残数把握には使えない(あくまで大まかな傾向監視用)。
+ */
+const LINE_QUOTA_CONSUMPTION_URL_ = 'https://api.line.me/v2/bot/message/quota/consumption';
+
+function logLineChannelQuotaConsumption_() {
+  const props = PropertiesService.getScriptProperties();
+  const now = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm');
+
+  LINE_CHANNELS_.forEach(function (channel) {
+    const token = props.getProperty(channel.accessTokenProp);
+    if (!token) {
+      Logger.log('[' + channel.label + '] アクセストークン未設定のため消費数を取得できませんでした。');
+      return;
+    }
+    try {
+      const response = UrlFetchApp.fetch(LINE_QUOTA_CONSUMPTION_URL_, {
+        method: 'get',
+        headers: { Authorization: 'Bearer ' + token },
+        muteHttpExceptions: true,
+      });
+      if (response.getResponseCode() !== 200) {
+        Logger.log('[' + channel.label + '] 消費数の取得に失敗(' + response.getResponseCode() + '): ' + response.getContentText());
+        return;
+      }
+      const json = JSON.parse(response.getContentText());
+      Logger.log('[' + channel.label + '] 当月消費: ' + json.totalUsage + '件(取得時刻: ' + now + '、反映に最大1日程度のタイムラグあり)');
+    } catch (e) {
+      Logger.log('[' + channel.label + '] 消費数の取得中にエラー: ' + e.message);
+    }
+  });
 }
 
 // ==== LINE Webhookのエントリーポイント(友だち追加後のuserId自動登録) ====
