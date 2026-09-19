@@ -139,3 +139,30 @@ function decideMitsukiDepartureNotices_(targetDate, calendarId) {
     return calcDepartureNoticeDetails_(target, WEATHER_LOCATIONS_.HOME.address, homeward, config);
   });
 }
+
+/**
+ * みつきさんの出発関連の通知をまとめて算出する(項目A2)。
+ * 1人につき暫定版1件・確定版1件に統合するため、登校(自転車通学)と、その日の家庭発の習い事
+ * (英語・お茶、または非登校日は部活等すべて)を、同じ配列に「セクション」として並べて返す。
+ * 平日: 登校(SCHOOL_COMMUTEセクション、あれば) + 英語・お茶等(あれば)
+ * 非登校日: 登校は無いので、部活・習い事等(あれば)のみ
+ * 対象が1つも無い日は空配列(=通知しない。項目A2)。
+ * @return {Array<Object>} 各要素は{mode:'SCHOOL_COMMUTE'|'CAR'|'BIKE', label, startTime, ...}。
+ *   SCHOOL_COMMUTEはdecideMitsukiSchoolCommute_の戻り値にmode:'SCHOOL_COMMUTE'を付けたもの。
+ *   他はdecideMitsukiDepartureNotices_(calcDepartureNoticeDetails_)の戻り値そのまま。
+ */
+function decideMitsukiCombinedNotices_(targetDate, calendarId) {
+  const sections = [];
+
+  const schoolCommute = decideMitsukiSchoolCommute_(targetDate, calendarId);
+  if (schoolCommute) {
+    schoolCommute.mode = 'SCHOOL_COMMUTE';
+    sections.push(schoolCommute);
+  }
+
+  decideMitsukiDepartureNotices_(targetDate, calendarId).forEach(function (item) {
+    sections.push(item);
+  });
+
+  return sections;
+}

@@ -52,8 +52,14 @@
  *                                        固定値。MapsのTRANSITモードでの取得は比較のためログにのみ出す(取得可否は
  *                                        実機での実行ログで確認可能。testYukiTravelTimes参照)
  *   YUKI_STATION_BUFFER_MIN            … 同、若林駅の余裕(車→電車の乗り継ぎ。分、デフォルト10。列車が15分間隔のため)
- *   YUKI_TRAIN_WAIT_MIN                … 同、帰りに刈谷市駅で電車に乗るまでの待ち時間(分、デフォルト10、仮値。新設。
- *                                        迎えの連絡リマインドの「若林駅に着く目安」の算出に使う)
+ *   YUKI_STATION_NOTICE_LEAD_MIN       … ゆうきさんの非登校日部活、「迎えの連絡+帰りの雨雲アラート」(項目A3)を
+ *                                        部活終了の何分前に送るか(デフォルト10、仮値)
+ *   YUKI_STATION_ARRIVAL_MIN_MIN       … 同メッセージ内、「学校を出てから若林駅までの見込み時間」の下限(分、デフォルト45、仮値)
+ *   YUKI_STATION_ARRIVAL_MAX_MIN       … 同、上限(分、デフォルト60、仮値)
+ *   YUKI_STATION_NOTICE_CC             … 上記通知に一志さん・きくみさんをCCで含めるか("true"/"false"、デフォルトtrue。
+ *                                        運用序盤の状況確認用。falseにすると本人のみに送る。項目A3)
+ *   CAR_PICKUP_ALERT_SUPPRESS_NEAR_FINAL_MIN … 直前アラート・自転車の出発直前アラートの予約時刻が、確定版配信時刻
+ *                                        (実行時刻)の前後何分以内なら送らないか(分、デフォルト60、仮値。項目A5)
  * ------------------------------------------------------------
  */
 
@@ -347,6 +353,48 @@ function getPickupReminderLeadMinCar_() {
   return value && !isNaN(n) ? n : PICKUP_REMINDER_LEAD_MIN_CAR_FALLBACK_;
 }
 
+/**
+ * ゆうきさんの非登校日部活(TRANSITモード)、「迎えの連絡+帰りの雨雲アラート」の設定値(項目A3)。
+ * 以前の「迎えの連絡リマインド」(終了時刻ちょうど)と「帰りの雨雲アラート」(終了30分前)を
+ * 1件に統合したため、専用のリード時間・宛先設定を新設した(WeatherNotify_Main.gsのscheduleYukiStationNotices_参照)。
+ */
+// 部活終了の何分前に送るか(仮値)
+const YUKI_STATION_NOTICE_LEAD_MIN_PROP_ = 'YUKI_STATION_NOTICE_LEAD_MIN';
+const YUKI_STATION_NOTICE_LEAD_MIN_FALLBACK_ = 10;
+
+function getYukiStationNoticeLeadMin_() {
+  const value = PropertiesService.getScriptProperties().getProperty(YUKI_STATION_NOTICE_LEAD_MIN_PROP_);
+  const n = Number(value);
+  return value && !isNaN(n) ? n : YUKI_STATION_NOTICE_LEAD_MIN_FALLBACK_;
+}
+
+// 「学校を出てから若林駅までは◯〜◯分ほどかかる見込みです」の下限・上限(仮値)
+const YUKI_STATION_ARRIVAL_MIN_MIN_PROP_ = 'YUKI_STATION_ARRIVAL_MIN_MIN';
+const YUKI_STATION_ARRIVAL_MIN_MIN_FALLBACK_ = 45;
+
+function getYukiStationArrivalMinMin_() {
+  const value = PropertiesService.getScriptProperties().getProperty(YUKI_STATION_ARRIVAL_MIN_MIN_PROP_);
+  const n = Number(value);
+  return value && !isNaN(n) ? n : YUKI_STATION_ARRIVAL_MIN_MIN_FALLBACK_;
+}
+
+const YUKI_STATION_ARRIVAL_MAX_MIN_PROP_ = 'YUKI_STATION_ARRIVAL_MAX_MIN';
+const YUKI_STATION_ARRIVAL_MAX_MIN_FALLBACK_ = 60;
+
+function getYukiStationArrivalMaxMin_() {
+  const value = PropertiesService.getScriptProperties().getProperty(YUKI_STATION_ARRIVAL_MAX_MIN_PROP_);
+  const n = Number(value);
+  return value && !isNaN(n) ? n : YUKI_STATION_ARRIVAL_MAX_MIN_FALLBACK_;
+}
+
+// 一志さん・きくみさんをCCで含めるか(既定true。運用序盤の状況確認用で、あとから外せるようにする)
+const YUKI_STATION_NOTICE_CC_PROP_ = 'YUKI_STATION_NOTICE_CC';
+
+function getYukiStationNoticeCc_() {
+  const value = PropertiesService.getScriptProperties().getProperty(YUKI_STATION_NOTICE_CC_PROP_);
+  return value === null ? true : value === 'true';
+}
+
 // ==== 自転車の出発直前アラート(本人のみ、CCなし)を、出発目安の何分前に送るか(項目9・仮値) ====
 const BIKE_DEPARTURE_ALERT_LEAD_MIN_PROP_ = 'BIKE_DEPARTURE_ALERT_LEAD_MIN';
 const BIKE_DEPARTURE_ALERT_LEAD_MIN_FALLBACK_ = 30;
@@ -355,6 +403,19 @@ function getBikeDepartureAlertLeadMin_() {
   const value = PropertiesService.getScriptProperties().getProperty(BIKE_DEPARTURE_ALERT_LEAD_MIN_PROP_);
   const n = Number(value);
   return value && !isNaN(n) ? n : BIKE_DEPARTURE_ALERT_LEAD_MIN_FALLBACK_;
+}
+
+// ==== 直前アラート・自転車の出発直前アラートを、確定版配信時刻(実行時刻)の前後何分以内なら抑制するか(項目A5・仮値) ====
+// 確定版配信直後に「直前」を謳うアラートが二重に届くのを避けるための抑制ルール。
+// 「配信時刻」は固定の6:30ではなく、実際にsendFinalNotification()が実行された時刻(=このプロパティを
+// 参照する時点のDate.now())を基準にする(実際の発火が6:30きっかりとは限らないため。B1参照)。
+const CAR_PICKUP_ALERT_SUPPRESS_NEAR_FINAL_MIN_PROP_ = 'CAR_PICKUP_ALERT_SUPPRESS_NEAR_FINAL_MIN';
+const CAR_PICKUP_ALERT_SUPPRESS_NEAR_FINAL_MIN_FALLBACK_ = 60;
+
+function getCarPickupAlertSuppressNearFinalMin_() {
+  const value = PropertiesService.getScriptProperties().getProperty(CAR_PICKUP_ALERT_SUPPRESS_NEAR_FINAL_MIN_PROP_);
+  const n = Number(value);
+  return value && !isNaN(n) ? n : CAR_PICKUP_ALERT_SUPPRESS_NEAR_FINAL_MIN_FALLBACK_;
 }
 
 // ==== 到着の余裕(自転車の出発目安の計算に加える。項目2。初期値0=余裕を見ない) ====
@@ -517,6 +578,7 @@ function calcDepartureNoticeDetailsFromData_(target, travelMinutes, pop, returnP
     label: target.label,
     mode: 'BIKE',
     startTime: target.startTime,
+    endTime: target.endTime, // 項目A6: みつきの家庭発の習い事(お茶等)の帰りの雨雲アラートがこのendTimeを基準にする
     departureTime: bike.departureTime,
     travelMinutes: bike.travelMinutes,
     isRaining: bike.isRaining,

@@ -46,9 +46,11 @@ const YUKI_LESSON_NAMES_ = [];
  *   − 車(自宅→若林駅、YUKI_CAR_TO_STATION_FALLBACK_MIN)
  *   − 車の余裕(YUKI_CAR_MARGIN_MIN)
  *
- * 若林駅に着く目安(迎えの連絡リマインドで案内) = 部活の終了時刻
- *   + 徒歩(学校→刈谷市駅、YUKI_WALK_FALLBACK_MIN) + 徒歩の余裕(YUKI_WALK_MARGIN_MIN)
- *   + 電車の待ち(YUKI_TRAIN_WAIT_MIN) + 電車(YUKI_TRAIN_MIN)
+ * 帰り(迎えの連絡+帰りの雨雲アラート。項目A3で統合、WeatherNotify_Main.gsのscheduleYukiStationNotices_):
+ *   部活終了のYUKI_STATION_NOTICE_LEAD_MIN分前に、5地点の雨雲情報と「学校を出てから若林駅までは
+ *   YUKI_STATION_ARRIVAL_MIN_MIN〜YUKI_STATION_ARRIVAL_MAX_MIN分ほどかかる見込みです」という
+ *   固定の目安レンジを案内する(以前あったcalcYukiStationArrivalEstimate_による分単位の逆算は、
+ *   この統合に伴い廃止した)。
  *
  * 2026/9/21(月)朝のGoogleマップ・Yahoo!乗換案内での実地検索値(ユーザー確認済み):
  *   若林駅→刈谷市駅: 26分(知立で乗換1回、待ち含む。列車は15分間隔)
@@ -118,16 +120,6 @@ function getYukiStationBufferMin_() {
   return value && !isNaN(n) ? n : YUKI_STATION_BUFFER_MIN_FALLBACK_;
 }
 
-// 電車の待ち(分、仮値、新設)。帰り、刈谷市駅で電車に乗るまでの待ち時間(若林駅の余裕とは別、帰り専用)
-const YUKI_TRAIN_WAIT_MIN_PROP_ = 'YUKI_TRAIN_WAIT_MIN';
-const YUKI_TRAIN_WAIT_MIN_FALLBACK_ = 10;
-
-function getYukiTrainWaitMin_() {
-  const value = PropertiesService.getScriptProperties().getProperty(YUKI_TRAIN_WAIT_MIN_PROP_);
-  const n = Number(value);
-  return value && !isNaN(n) ? n : YUKI_TRAIN_WAIT_MIN_FALLBACK_;
-}
-
 /**
  * TRANSITモードの出発目安を算出する純粋関数(区間ごとの移動時間・余裕の合計を開始時刻から引くだけ)。
  * ネットワークアクセスを行わないため、テストハーネスからモックデータで検証できる。
@@ -145,21 +137,6 @@ function calcYukiTransitDepartureFromData_(startTime, carMin, carMarginMin, trai
     walkMarginMin: walkMarginMin,
     totalMin: totalMin,
   };
-}
-
-/**
- * 若林駅に着く目安(帰り)を算出する純粋関数。迎えの連絡リマインドの本文で使う(項目B)。
- * ネットワークアクセスを行わないため、テストハーネスからモックデータで検証できる。
- */
-function calcYukiStationArrivalEstimateFromData_(endTime, walkMin, walkMarginMin, trainWaitMin, trainMin) {
-  const totalMin = walkMin + walkMarginMin + trainWaitMin + trainMin;
-  return new Date(endTime.getTime() + totalMin * 60 * 1000);
-}
-
-// ==== calcYukiStationArrivalEstimateFromData_のラッパー(固定値のみで完結。Maps呼び出しなし) ====
-function calcYukiStationArrivalEstimate_(endTime) {
-  return calcYukiStationArrivalEstimateFromData_(endTime,
-    getYukiWalkFallbackMin_(), getYukiWalkMarginMin_(), getYukiTrainWaitMin_(), getYukiTrainMin_());
 }
 
 /**

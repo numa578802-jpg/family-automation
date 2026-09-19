@@ -101,48 +101,51 @@ function runWeatherNotification_(targetDate, isFinal) {
     Logger.log('ゆうきさんの登校 天気予報処理でエラー: ' + e.message);
   }
 
-  // みつきさん(登校・自転車通学の出発時刻お知らせ。送迎提案は出さない) → みつき本人 + 一志さん・きくみさん(CC)
-  try {
-    const commuteResult = decideMitsukiSchoolCommute_(targetDate, calendarId);
-    if (commuteResult) {
-      const message = dangerWarningPrefix + buildMitsukiSchoolCommuteMessage_(targetDate, commuteResult, isFinal) + riverSuffix;
-      sendLinePushToRecipients_(getPersonNotifyRecipients_(config, 'MITSUKI'), message);
-    } else {
-      Logger.log('みつきさん: ' + dateStr + ' は登校日ではないため登校 出発時刻のお知らせをスキップしました。');
-    }
-  } catch (e) {
-    Logger.log('みつきさんの登校 出発時刻のお知らせ処理でエラー: ' + e.message);
-  }
-
-  // 出発まわりの通知(ゆうき・みつき共通。項目A) → 本人 + 一志さん・きくみさん(CC)
-  // 暫定版は必ず送り、確定版は暫定版時点から判断が変わった予定のみ送る(diffDepartureNotice_)。
+  // 出発まわりの通知(ゆうき・みつき共通。項目A・項目A2で統合) → 本人 + 一志さん・きくみさん(CC)
+  // 項目A2: みつきさんは登校(自転車通学)+その日の家庭発の習い事・部活等を1人1通に統合する
+  // (decideMitsukiCombinedNotices_)。ゆうきさんも同日に複数の対象があれば1通にまとめる。
+  // 項目A1: 暫定版は対象が1件以上あれば必ず送る。確定版は「常に送る」(暫定版から変化が無くても、
+  // 最新の天気で計算し直して送る。変わった点があれば冒頭に併記し、無ければ「変更なし」と書く)。
   const departureNoticesByPerson = {};
   [
     { key: 'YUKI', label: 'ゆうき', compute: function () { return decideYukiDepartureNotices_(targetDate, calendarId); } },
-    { key: 'MITSUKI', label: 'みつき', compute: function () { return decideMitsukiDepartureNotices_(targetDate, calendarId); } },
+    { key: 'MITSUKI', label: 'みつき', compute: function () { return decideMitsukiCombinedNotices_(targetDate, calendarId); } },
   ].forEach(function (person) {
-    let results = [];
+    let sections = [];
     try {
-      results = person.compute();
+      sections = person.compute();
     } catch (e) {
       Logger.log(person.label + 'の出発まわりの通知の算出でエラー: ' + e.message);
     }
-    departureNoticesByPerson[person.key] = results;
+    departureNoticesByPerson[person.key] = sections;
 
     try {
-      sendDepartureNotices_(person.key, person.label, targetDate, isFinal, results,
+      sendCombinedDepartureNotices_(person.key, person.label, targetDate, isFinal, sections,
         getPersonNotifyRecipients_(config, person.key), dangerWarningPrefix, riverSuffix);
     } catch (e) {
       Logger.log(person.label + 'の出発まわりの通知の送信処理でエラー: ' + e.message);
     }
   });
 
-  // 確定版配信時のみ、帰りの少し前に「帰りの雨雲通過予報」・車送迎/自転車の直前アラートを予約する
+  // 確定版配信時のみ、帰りの少し前に各種アラートを予約する
   if (isFinal) {
     try {
       scheduleHomewardRainAlerts_(targetDate, calendarId);
     } catch (e) {
       Logger.log('帰りの雨雲アラートの予約処理でエラー: ' + e.message);
+    }
+    try {
+      // 項目A3: ゆうきさんの非登校日部活(TRANSITモード)は、帰りの雨雲アラート+迎えの連絡を統合した
+      // 専用の通知(scheduleYukiStationNotices_)で扱うため、ここでscheduleHomewardRainAlerts_とは別に呼ぶ。
+      scheduleYukiStationNotices_(targetDate, calendarId, departureNoticesByPerson.YUKI);
+    } catch (e) {
+      Logger.log('ゆうきの迎えの連絡+帰りの雨雲アラートの予約処理でエラー: ' + e.message);
+    }
+    try {
+      // 項目A6: みつきさんの家庭発の習い事(お茶等、BIKEモード)の帰りの雨雲アラート
+      scheduleMitsukiLessonRainAlerts_(targetDate, calendarId, departureNoticesByPerson.MITSUKI);
+    } catch (e) {
+      Logger.log('みつきの習い事帰りの雨雲アラートの予約処理でエラー: ' + e.message);
     }
     try {
       scheduleCarPickupAlerts_(targetDate, calendarId, departureNoticesByPerson);
@@ -270,6 +273,15 @@ function toDepartureNoticeSnapshot_(result) {
       departureTime: result.departureTime.toISOString(),
     };
   }
+  if (result.mode === 'SCHOOL_COMMUTE') {
+    return {
+      label: result.label,
+      mode: 'SCHOOL_COMMUTE',
+      startTime: result.startTime.toISOString(),
+      departureTime: result.departureTime.toISOString(),
+      isRaining: result.isRaining,
+    };
+  }
   return {
     label: result.label,
     mode: 'BIKE',
@@ -307,63 +319,99 @@ function diffDepartureNotice_(result, previousSnapshots) {
     const depLabel = Utilities.formatDate(result.departureTime, 'Asia/Tokyo', 'H:mm');
     const prevDepLabel = Utilities.formatDate(new Date(prev.departureTime), 'Asia/Tokyo', 'H:mm');
     if (depLabel !== prevDepLabel) changes.push('家を出る目安: ' + prevDepLabel + ' → ' + depLabel);
+  } else if (result.mode === 'SCHOOL_COMMUTE') {
+    const depLabel = Utilities.formatDate(result.departureTime, 'Asia/Tokyo', 'H:mm');
+    const prevDepLabel = Utilities.formatDate(new Date(prev.departureTime), 'Asia/Tokyo', 'H:mm');
+    if (depLabel !== prevDepLabel) changes.push('家を出る目安: ' + prevDepLabel + ' → ' + depLabel);
+    if (result.isRaining !== prev.isRaining) {
+      changes.push(result.isRaining ? '雨天予報に変わりました(カッパ推奨)' : '雨天予報が解消しました');
+    }
   }
 
   return changes.length > 0 ? changes.join(' / ') : null;
 }
 
-// ==== 出発まわりの通知を、暫定版/確定版の別に応じて送信する ====
-function sendDepartureNotices_(personKey, personLabel, targetDate, isFinal, results, recipients, dangerWarningPrefix, riverSuffix) {
+/**
+ * 出発まわりの通知(統合版)を、暫定版/確定版の別に応じて送信する(項目A1・A2)。
+ * 1人につき、その日の対象セクション(登校・習い事・部活等)をまとめて1通で送る。
+ * ------------------------------------------------------------
+ * ・暫定版: 対象セクションが1件以上あれば必ず送る(0件ならスキップ。項目A2「対象の項目が
+ *   1つもない日は出さない」)。
+ * ・確定版(項目A1で改訂): 暫定版から変化が無くても常に送る。最新の天気で計算し直し、
+ *   変わった点があれば冒頭に「(◯◯: ...)」の形で併記し、無ければ「(変更なし)」と書く
+ *   (buildCombinedDiffSummary_)。暫定版・確定版とも対象が0件であればスキップする
+ *   (ただし暫定版で送ったのに確定版で対象が0件になった=全て無くなった場合は、その旨を
+ *   知らせるため確定版を送る。buildCombinedDiffSummary_の「予定が無くなりました」参照)。
+ * ------------------------------------------------------------
+ */
+function sendCombinedDepartureNotices_(personKey, personLabel, targetDate, isFinal, sections, recipients, dangerWarningPrefix, riverSuffix) {
   const dateStr = Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyy-MM-dd');
   const props = PropertiesService.getScriptProperties();
   const snapshotKey = departureNoticeSnapshotKey_(personKey, targetDate);
 
   if (!isFinal) {
-    if (results.length === 0) {
-      Logger.log(personLabel + ': ' + dateStr + ' は出発まわりの通知の対象予定が無いためスキップしました。');
+    if (sections.length === 0) {
+      Logger.log(personLabel + ': ' + dateStr + ' は出発まわりの通知の対象が無いためスキップしました。');
       props.deleteProperty(snapshotKey);
       return;
     }
-    results.forEach(function (result) {
-      const message = dangerWarningPrefix + buildDepartureNoticeMessage_(targetDate, personLabel, result, isFinal, null) + riverSuffix;
-      sendLinePushToRecipients_(recipients, message);
-    });
-    props.setProperty(snapshotKey, JSON.stringify(results.map(toDepartureNoticeSnapshot_)));
+    const message = dangerWarningPrefix + buildCombinedDepartureMessage_(targetDate, personLabel, sections, isFinal, null) + riverSuffix;
+    sendLinePushToRecipients_(recipients, message);
+    props.setProperty(snapshotKey, JSON.stringify(sections.map(toDepartureNoticeSnapshot_)));
     return;
   }
 
-  // 確定版: 暫定版スナップショットと比較し、変更があった予定のみ送る
+  // 確定版(項目A1: 常に送る)
   const storedRaw = props.getProperty(snapshotKey);
   const previousSnapshots = storedRaw ? JSON.parse(storedRaw) : null;
-  if (results.length === 0) {
-    Logger.log(personLabel + ': ' + dateStr + ' は出発まわりの通知の対象予定が無いためスキップしました。');
-  } else {
-    results.forEach(function (result) {
-      const diff = diffDepartureNotice_(result, previousSnapshots);
-      if (!diff) {
-        Logger.log(personLabel + ': 「' + result.label + '」は暫定版から変更がないため確定版の送信をスキップしました。');
-        return;
-      }
-      const message = dangerWarningPrefix + buildDepartureNoticeMessage_(targetDate, personLabel, result, isFinal, diff) + riverSuffix;
-      sendLinePushToRecipients_(recipients, message);
-    });
+
+  if (sections.length === 0 && (!previousSnapshots || previousSnapshots.length === 0)) {
+    Logger.log(personLabel + ': ' + dateStr + ' は出発まわりの通知の対象が無いためスキップしました。');
+    props.deleteProperty(snapshotKey);
+    return;
   }
+
+  const diffSummary = buildCombinedDiffSummary_(sections, previousSnapshots);
+  const message = dangerWarningPrefix + buildCombinedDepartureMessage_(targetDate, personLabel, sections, isFinal, diffSummary) + riverSuffix;
+  sendLinePushToRecipients_(recipients, message);
   props.deleteProperty(snapshotKey); // この日の確定版処理が終わったらスナップショットは不要
 }
 
-// ==== 出発まわりの通知のメッセージ文面(CARモード/BIKEモードで内容が異なる) ====
-function buildDepartureNoticeMessage_(targetDate, personLabel, result, isFinal, diffDescription) {
-  const dateLabel = formatDateLabelJa_(targetDate);
-  const versionLabel = isFinal ? '確定版' : '暫定版';
+// ==== 確定版の冒頭に出す変更点の要約(項目A1)。変化が無ければ「変更なし」を返す ====
+function buildCombinedDiffSummary_(sections, previousSnapshots) {
+  const parts = [];
+  sections.forEach(function (result) {
+    const diff = diffDepartureNotice_(result, previousSnapshots);
+    if (diff) parts.push(result.label + ': ' + diff);
+  });
+  // 暫定版の時点にはあったが、確定版の対象からは外れた(=予定が無くなった)ものも変化として報告する
+  (previousSnapshots || []).forEach(function (prev) {
+    const stillExists = sections.some(function (s) { return s.label === prev.label; });
+    if (!stillExists) {
+      parts.push(prev.label + ': 予定が無くなりました(暫定版の時点ではありましたが、確定版の対象からは外れました)');
+    }
+  });
+  return parts.length > 0 ? parts.join(' / ') : '変更なし';
+}
+
+// ==== 出発まわりの通知1セクション分の本文(見出し・出典リンクは含まない)。CAR/TRANSIT/BIKE/SCHOOL_COMMUTEで内容が異なる ====
+function buildDepartureNoticeSectionLines_(result) {
   const startLabel = Utilities.formatDate(result.startTime, 'Asia/Tokyo', 'H:mm');
-
   const lines = [];
-  lines.push('【' + personLabel + '】' + dateLabel + ' ' + result.label + ' 出発まわりの通知 - ' + versionLabel);
-  if (diffDescription) {
-    lines.push('(' + diffDescription + ')');
-  }
 
-  if (result.mode === 'CAR') {
+  if (result.mode === 'SCHOOL_COMMUTE') {
+    // 項目A2: みつきさんの登校(自転車通学)。送迎提案・徒歩提案は出さない。雨天時はカッパの準備を知らせる。
+    const departureLabel = Utilities.formatDate(result.departureTime, 'Asia/Tokyo', 'H:mm');
+    lines.push('予定: ' + result.label + '(' + startLabel + '〜)');
+    if (result.pop !== null) {
+      lines.push('降水確率: ' + result.pop + '%');
+    }
+    if (result.isRaining) {
+      lines.push('雨天のためカッパを準備してください。');
+    }
+    const detailParts = ['自転車で約' + result.travelMinutes + '分', '余裕' + result.marginMin + '分'];
+    lines.push('家を出る目安: ' + departureLabel + '頃(' + detailParts.join(' + ') + ')');
+  } else if (result.mode === 'CAR') {
     // 車送迎固定(項目A-2)。自転車換算・降水判定・カッパ準備・送迎要否判断は行わない。
     // 送迎の手配は本人の責任という方針のため、文面は本人に連絡を促す形にする。
     // 行きの出発目安=予定開始時刻から車移動時間の仮値(CAR_TRAVEL_MINUTES_DEFAULT)を引いた時刻、
@@ -411,7 +459,53 @@ function buildDepartureNoticeMessage_(targetDate, personLabel, result, isFinal, 
     }
   }
 
+  return lines;
+}
+
+// ==== 出発まわりの通知1件分のメッセージ(単体送信・診断用。本番の複数セクション統合送信はbuildCombinedDepartureMessage_を使う) ====
+function buildDepartureNoticeMessage_(targetDate, personLabel, result, isFinal, diffDescription) {
+  const dateLabel = formatDateLabelJa_(targetDate);
+  const versionLabel = isFinal ? '確定版' : '暫定版';
+
+  const lines = [];
+  lines.push('【' + personLabel + '】' + dateLabel + ' ' + result.label + ' 出発まわりの通知 - ' + versionLabel);
+  if (diffDescription) {
+    lines.push('(' + diffDescription + ')');
+  }
+  lines.push.apply(lines, buildDepartureNoticeSectionLines_(result));
+
   const sourceLine = buildSourceLinksLine_(result.usedPop || false, false);
+  if (sourceLine) lines.push(sourceLine);
+
+  if (!isFinal) {
+    lines.push('※判断に変更があれば当日6:30頃に確定版をお送りします');
+  }
+  return lines.join('\n');
+}
+
+/**
+ * 出発まわりの通知(統合版)のメッセージ文面(項目A2)。1人1通、複数セクション(登校・習い事・部活等)を
+ * 「▼ 予定名」の見出しで区切って並べる。確定版はdiffSummaryText(buildCombinedDiffSummary_の結果、
+ * 「変更なし」を含む)を冒頭に併記する(項目A1)。出典リンクは全セクションのusedPopをまとめて1回だけ出す。
+ */
+function buildCombinedDepartureMessage_(targetDate, personLabel, sections, isFinal, diffSummaryText) {
+  const dateLabel = formatDateLabelJa_(targetDate);
+  const versionLabel = isFinal ? '確定版' : '暫定版';
+
+  const lines = [];
+  lines.push('【' + personLabel + '】' + dateLabel + ' 出発まわりの通知 - ' + versionLabel);
+  if (diffSummaryText) {
+    lines.push('(' + diffSummaryText + ')');
+  }
+
+  sections.forEach(function (result, index) {
+    if (index > 0) lines.push('');
+    lines.push('▼ ' + result.label);
+    lines.push.apply(lines, buildDepartureNoticeSectionLines_(result));
+  });
+
+  const usedPopAny = sections.some(function (s) { return s.usedPop; });
+  const sourceLine = buildSourceLinksLine_(usedPopAny, false);
   if (sourceLine) lines.push(sourceLine);
 
   if (!isFinal) {
@@ -437,8 +531,15 @@ function scheduleHomewardRainAlerts_(targetDate, calendarId) {
   const config = getWeatherConfig_();
   const leadMin = config.homewardAlertLeadMin;
 
-  scheduleHomewardRainAlertFor_('YUKI', 'ゆうき', targetDate, calendarId, '【ゆうき】',
-    getYukiDefaultSchoolEnd_(), YUKI_ROUTE_CHECK_KEYS_, leadMin, YUKI_LESSON_NAMES_);
+  // 項目A3: ゆうきさんの非登校日部活(TRANSITモード)は、帰りの雨雲アラート+迎えの連絡を統合した
+  // 専用の通知(scheduleYukiStationNotices_)に置き換えたため、ここでは登校日のみ対象とする
+  // (登校日の下校の雨雲アラートは、この統合の対象外・変更なし。項目A3のユーザー指示どおり)。
+  if (isYukiSchoolDay_(targetDate, calendarId)) {
+    scheduleHomewardRainAlertFor_('YUKI', 'ゆうき', targetDate, calendarId, '【ゆうき】',
+      getYukiDefaultSchoolEnd_(), YUKI_ROUTE_CHECK_KEYS_, leadMin, YUKI_LESSON_NAMES_);
+  } else {
+    Logger.log('ゆうき: 非登校日のため、従来型の帰りの雨雲アラートはスキップしました(scheduleYukiStationNotices_に統合済み)。');
+  }
   // 英語・お茶は「学校から家に向かう予定」ではない(いったん帰宅してから家庭発で出発する)ため、
   // 帰り予定時刻の算出対象からは除外する(含めると帰り時刻が大幅に後ろへずれ、アラートの発火予約も
   // 連動してずれてしまうバグになる)。
@@ -535,6 +636,198 @@ function buildHomewardRainAlertMessage_(personLabel, homewardTime, rainSpotDetai
 }
 
 /**
+ * ゆうきさんの非登校日部活(TRANSITモード)の「迎えの連絡+帰りの雨雲アラート」(項目A3)
+ * ------------------------------------------------------------
+ * 以前は「帰りの雨雲アラート」(部活終了の30分前・HOMEWARD_ALERT_LEAD_MIN)と「迎えの連絡リマインド」
+ * (部活終了ちょうど)の2件に分かれていたが、1件に統合した。確定版配信時に、部活終了の
+ * YUKI_STATION_NOTICE_LEAD_MIN分前(既定10分)に発火する使い捨てトリガーを予約する。
+ * 内容は5地点(YUKI_ROUTE_CHECK_KEYS_)の雨雲情報 + 「刈谷市駅で乗る電車が決まったら、迎えの担当の方へ
+ * 若林駅の到着時刻を連絡してください。学校を出てから若林駅までは、YUKI_STATION_ARRIVAL_MIN_MIN〜
+ * YUKI_STATION_ARRIVAL_MAX_MIN分ほどかかる見込みです。」という案内文。
+ * 宛先はゆうき本人(登録済み)+一志さん・きくみさん(CC、YUKI_STATION_NOTICE_CCでオンオフ可能)。
+ * 登校日の下校の雨雲アラート(scheduleHomewardRainAlerts_)は変更しない(項目A3のユーザー指示どおり)。
+ * ------------------------------------------------------------
+ */
+const YUKI_STATION_NOTICE_PENDING_PREFIX_ = 'PENDING_YUKI_STATION_NOTICE_';
+
+// ==== 確定版配信時に、ゆうきさんのTRANSITモードの予定それぞれの「迎えの連絡+帰りの雨雲アラート」を予約する ====
+function scheduleYukiStationNotices_(targetDate, calendarId, yukiSections) {
+  const leadMin = getYukiStationNoticeLeadMin_();
+  const targets = (yukiSections || []).filter(function (r) { return r.mode === 'TRANSIT'; });
+  if (targets.length === 0) return;
+
+  targets.forEach(function (target, index) {
+    if (!target.endTime) {
+      Logger.log('ゆうき: ' + target.label + 'は終了時刻が不明なため、迎えの連絡+帰りの雨雲アラートは予約しませんでした。');
+      return;
+    }
+    const alertTime = new Date(target.endTime.getTime() - leadMin * 60 * 1000);
+    if (alertTime.getTime() <= Date.now()) {
+      Logger.log('ゆうき: ' + target.label + '(終了予定 ' + target.endTime + ')が近すぎる/過去のため、迎えの連絡+帰りの雨雲アラートは予約しませんでした。');
+      return;
+    }
+
+    const props = PropertiesService.getScriptProperties();
+    const key = YUKI_STATION_NOTICE_PENDING_PREFIX_ + Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyyMMdd') + '_' + index;
+    props.setProperty(key, JSON.stringify({
+      label: target.label,
+      endTime: target.endTime.toISOString(),
+      scheduledAt: alertTime.toISOString(),
+    }));
+    ScriptApp.newTrigger('runScheduledYukiStationNotices_').timeBased().at(alertTime).create();
+    Logger.log('ゆうき: ' + target.label + 'の迎えの連絡+帰りの雨雲アラートを' + alertTime + 'に予約しました(終了予定 ' + target.endTime + ')。');
+  });
+}
+
+// ==== 予約された「迎えの連絡+帰りの雨雲アラート」を、実際の時刻が来たら送信する(使い捨てトリガーから呼ばれる) ====
+function runScheduledYukiStationNotices_(e) {
+  if (e && e.triggerUid) {
+    ScriptApp.getProjectTriggers().forEach(function (trigger) {
+      if (trigger.getUniqueId() === e.triggerUid) {
+        ScriptApp.deleteTrigger(trigger);
+      }
+    });
+  }
+
+  const props = PropertiesService.getScriptProperties();
+  const allProps = props.getProperties();
+  const now = Date.now();
+  const config = getWeatherConfig_();
+
+  Object.keys(allProps).forEach(function (key) {
+    if (key.indexOf(YUKI_STATION_NOTICE_PENDING_PREFIX_) !== 0) return;
+    const data = JSON.parse(allProps[key]);
+    if (new Date(data.scheduledAt).getTime() > now + 60 * 1000) return;
+
+    props.deleteProperty(key); // 二重送信防止のため、処理対象として取り出した時点で先に削除
+
+    try {
+      const rainSpotDetails = [];
+      YUKI_ROUTE_CHECK_KEYS_.forEach(function (locKey) {
+        const mmh = getMaxForecastRainfallMmh_(locKey);
+        if (mmh !== null) rainSpotDetails.push({ label: WEATHER_LOCATIONS_[locKey].label, mmh: mmh });
+      });
+      const message = buildYukiStationNoticeMessage_(data.label, new Date(data.endTime), rainSpotDetails);
+      sendLinePushToRecipients_(getYukiStationNoticeRecipients_(config), message);
+    } catch (err) {
+      Logger.log('ゆうきの迎えの連絡+帰りの雨雲アラートの送信でエラー(' + data.label + '): ' + err.message);
+    }
+  });
+}
+
+// ==== 宛先: 本人(登録済み)+一志さん・きくみさん(CC。YUKI_STATION_NOTICE_CCでオンオフ可能。項目A3) ====
+function getYukiStationNoticeRecipients_(config) {
+  const all = getPersonNotifyRecipients_(config, 'YUKI'); // [本人, 一志(CC), きくみ(CC)]
+  return getYukiStationNoticeCc_() ? all : [all[0]];
+}
+
+// ==== 「迎えの連絡+帰りの雨雲アラート」のメッセージ文面 ====
+function buildYukiStationNoticeMessage_(label, endTime, rainSpotDetails) {
+  const endLabel = Utilities.formatDate(endTime, 'Asia/Tokyo', 'H:mm');
+  const lines = [];
+  lines.push('【ゆうき】' + label + ' 帰り 雨雲通過予報・迎えの連絡リマインド');
+  lines.push('帰りの予定(' + endLabel + '頃)にかけての雨雲の様子:');
+  if (rainSpotDetails.length === 0) {
+    lines.push('雨雲情報を取得できませんでした。');
+  } else {
+    rainSpotDetails.forEach(function (spot) {
+      lines.push('・' + spot.label + ': ' + spot.mmh + 'mm/h');
+    });
+  }
+  lines.push(label + 'は' + endLabel + 'ごろ終了予定です。刈谷市駅で乗る電車が決まったら、迎えの担当の方へ若林駅の到着時刻を連絡してください。' +
+    '学校を出てから若林駅までは、' + getYukiStationArrivalMinMin_() + '〜' + getYukiStationArrivalMaxMin_() + '分ほどかかる見込みです。');
+  const sourceLine = buildSourceLinksLine_(false, rainSpotDetails.length > 0);
+  if (sourceLine) lines.push(sourceLine);
+  const riverLine = buildRiverLevelInfoLine_();
+  if (riverLine) lines.push(riverLine);
+  return lines.join('\n');
+}
+
+/**
+ * みつきさんの家庭発の習い事(お茶等、BIKEモード)の帰りの雨雲アラート(項目A6)
+ * ------------------------------------------------------------
+ * 既存の「帰りの雨雲アラート」(scheduleHomewardRainAlertFor_)は、英語・お茶をMITSUKI_LESSON_NAMES_で
+ * 除外している(いったん帰宅してから家庭発で出発する予定のため、学校発の帰り予定時刻の算出対象には
+ * 含めない設計。上記参照)。そのため従来、お茶自体の帰り(お茶の終了時刻を基準にした)雨雲アラートは
+ * 存在しなかった。この関数はその欠落を埋め、お茶の終了時刻のHOMEWARD_ALERT_LEAD_MIN分前(既存の
+ * 帰りの雨雲アラートと同じ既定30分)に、既存の「みつきの下校時雨雲アラート」と同じ地点(自宅・
+ * 前林中学校)・宛先で通知する。英語(車で迎え、CARモード)は対象外(現状維持。車送迎のため)。
+ * 対象はBIKEモードかつMITSUKI_LESSON_NAMES_に一致する予定(現状は「お茶」のみ該当。英語はCARモードの
+ * ため自動的に対象外)。お茶自体の場所(location)が取れる場合にその地点を雨雲判定に使う設計は、
+ * 今回は見送った(調査結果は報告参照。getMaxForecastRainfallMmh_はWEATHER_LOCATIONS_の固定キーのみ
+ * 対応しており、任意住所のジオコーディング・ナウキャスト判定には別途対応が必要なため)。
+ * ------------------------------------------------------------
+ */
+const MITSUKI_LESSON_RAIN_ALERT_PENDING_PREFIX_ = 'PENDING_MITSUKI_LESSON_RAIN_ALERT_';
+
+// ==== 確定版配信時に、みつきさんの家庭発の習い事(お茶等)の帰りの雨雲アラートを予約する ====
+function scheduleMitsukiLessonRainAlerts_(targetDate, calendarId, mitsukiSections) {
+  const leadMin = getWeatherConfig_().homewardAlertLeadMin;
+  const targets = (mitsukiSections || []).filter(function (r) { return r.mode === 'BIKE' && isMitsukiLessonName_(r.label); });
+  if (targets.length === 0) return;
+
+  targets.forEach(function (target, index) {
+    if (!target.endTime) {
+      Logger.log('みつき: ' + target.label + 'は終了時刻が不明なため、帰りの雨雲アラートは予約しませんでした。');
+      return;
+    }
+    const alertTime = new Date(target.endTime.getTime() - leadMin * 60 * 1000);
+    if (alertTime.getTime() <= Date.now()) {
+      Logger.log('みつき: ' + target.label + '(終了予定 ' + target.endTime + ')が近すぎる/過去のため、帰りの雨雲アラートは予約しませんでした。');
+      return;
+    }
+
+    const props = PropertiesService.getScriptProperties();
+    const key = MITSUKI_LESSON_RAIN_ALERT_PENDING_PREFIX_ + Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyyMMdd') + '_' + index;
+    props.setProperty(key, JSON.stringify({
+      label: target.label,
+      endTime: target.endTime.toISOString(),
+      scheduledAt: alertTime.toISOString(),
+    }));
+    ScriptApp.newTrigger('runScheduledMitsukiLessonRainAlerts_').timeBased().at(alertTime).create();
+    Logger.log('みつき: ' + target.label + 'の帰りの雨雲アラートを' + alertTime + 'に予約しました(終了予定 ' + target.endTime + ')。');
+  });
+}
+
+// ==== 予約されたみつきさんの習い事帰りの雨雲アラートを、実際の時刻が来たら送信する(使い捨てトリガーから呼ばれる) ====
+function runScheduledMitsukiLessonRainAlerts_(e) {
+  if (e && e.triggerUid) {
+    ScriptApp.getProjectTriggers().forEach(function (trigger) {
+      if (trigger.getUniqueId() === e.triggerUid) {
+        ScriptApp.deleteTrigger(trigger);
+      }
+    });
+  }
+
+  const props = PropertiesService.getScriptProperties();
+  const allProps = props.getProperties();
+  const now = Date.now();
+  const config = getWeatherConfig_();
+
+  Object.keys(allProps).forEach(function (key) {
+    if (key.indexOf(MITSUKI_LESSON_RAIN_ALERT_PENDING_PREFIX_) !== 0) return;
+    const data = JSON.parse(allProps[key]);
+    if (new Date(data.scheduledAt).getTime() > now + 60 * 1000) return;
+
+    props.deleteProperty(key); // 二重送信防止のため、処理対象として取り出した時点で先に削除
+
+    try {
+      const rainSpotDetails = [];
+      ['HOME', 'SCHOOL_MITSUKI'].forEach(function (locKey) {
+        const mmh = getMaxForecastRainfallMmh_(locKey);
+        if (mmh !== null) rainSpotDetails.push({ label: WEATHER_LOCATIONS_[locKey].label, mmh: mmh });
+      });
+      // 既存の「みつきの下校時雨雲アラート」と同じ文面構成を使う(項目A6)。どの予定の帰りかを
+      // 明示するため、personLabelに予定名を併記する(下校時雨雲アラートと同時に届いても区別できるように)。
+      const message = buildHomewardRainAlertMessage_('みつき(' + data.label + ')', new Date(data.endTime), rainSpotDetails, false);
+      sendLinePushToRecipients_(getPersonNotifyRecipients_(config, 'MITSUKI'), message);
+    } catch (err) {
+      Logger.log('みつきの習い事帰りの雨雲アラートの送信でエラー(' + data.label + '): ' + err.message);
+    }
+  });
+}
+
+/**
  * 直前アラート(項目A-2・項目A5)
  * ------------------------------------------------------------
  * 出発まわりの通知(項目A)でCARモード(英語)またはTRANSITモード(ゆうきの非登校日部活)と
@@ -553,6 +846,7 @@ const CAR_PICKUP_ALERT_PENDING_PREFIX_ = 'PENDING_CAR_PICKUP_ALERT_';
 // ==== 確定版配信時に、出発まわりの通知でCAR/TRANSITモードだった予定それぞれの直前アラートを予約する ====
 function scheduleCarPickupAlerts_(targetDate, calendarId, departureNoticesByPerson) {
   const leadMin = getCarPickupAlertLeadMin_();
+  const nowMs = Date.now(); // 項目A5: 「確定版の配信時刻」は、この関数が実行された時刻(=確定版配信の実行時刻そのもの)を基準にする
 
   ['YUKI', 'MITSUKI'].forEach(function (personKey) {
     const personLabel = personKey === 'YUKI' ? 'ゆうき' : 'みつき';
@@ -561,8 +855,16 @@ function scheduleCarPickupAlerts_(targetDate, calendarId, departureNoticesByPers
 
     targets.forEach(function (target, index) {
       const alertTime = new Date(target.departureTime.getTime() - leadMin * 60 * 1000);
-      if (alertTime.getTime() <= Date.now()) {
+      if (alertTime.getTime() <= nowMs) {
         Logger.log(personLabel + ': ' + target.label + '(家を出る目安 ' + target.departureTime + ')が近すぎる/過去のため、直前アラートは予約しませんでした。');
+        return;
+      }
+      // 項目A5: 直前アラートの予約時刻が、確定版配信時刻(=現在時刻)の前後60分(仮値)以内なら出さない
+      // (確定版本文で既に同じ内容が案内済みのため、直後に「直前」アラートが重ねて届くのを避ける)。
+      const suppressMin = getCarPickupAlertSuppressNearFinalMin_();
+      if ((alertTime.getTime() - nowMs) / (60 * 1000) <= suppressMin) {
+        Logger.log(personLabel + ': ' + target.label + 'の直前アラート予定時刻(' + alertTime + ')が確定版配信時刻から' +
+          suppressMin + '分以内のため、予約しませんでした(項目A5)。');
         return;
       }
 
@@ -651,9 +953,11 @@ const PICKUP_REMINDER_PENDING_PREFIX_ = 'PENDING_PICKUP_REMINDER_';
 
 // ==== 確定版配信時に、出発まわりの通知でCAR/TRANSITモードだった予定それぞれの迎えの連絡リマインドを予約する ====
 function schedulePickupReminders_(targetDate, calendarId, departureNoticesByPerson) {
+  // 項目A3: ゆうきさんのTRANSITモードは「迎えの連絡+帰りの雨雲アラート」(scheduleYukiStationNotices_)に
+  // 統合したため、ここではCARモード(現状はみつきさんの英語のみ)だけを対象とする。
   ['YUKI', 'MITSUKI'].forEach(function (personKey) {
     const personLabel = personKey === 'YUKI' ? 'ゆうき' : 'みつき';
-    const targets = (departureNoticesByPerson[personKey] || []).filter(function (r) { return r.mode === 'CAR' || r.mode === 'TRANSIT'; });
+    const targets = (departureNoticesByPerson[personKey] || []).filter(function (r) { return r.mode === 'CAR'; });
     if (targets.length === 0) return;
 
     targets.forEach(function (target, index) {
@@ -661,7 +965,7 @@ function schedulePickupReminders_(targetDate, calendarId, departureNoticesByPers
         Logger.log(personLabel + ': ' + target.label + 'は終了時刻が不明なため、迎えの連絡リマインドは予約しませんでした。');
         return;
       }
-      const leadMin = target.mode === 'CAR' ? getPickupReminderLeadMinCar_() : 0;
+      const leadMin = getPickupReminderLeadMinCar_();
       const reminderTime = new Date(target.endTime.getTime() - leadMin * 60 * 1000);
       if (reminderTime.getTime() <= Date.now()) {
         Logger.log(personLabel + ': ' + target.label + '(終了予定 ' + target.endTime + ')が近すぎる/過去のため、迎えの連絡リマインドは予約しませんでした。');
@@ -708,26 +1012,25 @@ function runScheduledPickupReminders_(e) {
     props.deleteProperty(key); // 二重送信防止のため、処理対象として取り出した時点で先に削除
 
     try {
-      const message = buildPickupReminderMessage_(data.personLabel, data.label, data.mode, new Date(data.endTime));
-      sendLinePushToRecipients_(getPersonNotifyRecipients_(config, data.personKey), message);
+      const message = buildPickupReminderMessage_(data.label, new Date(data.endTime));
+      // 項目A4: みつきさんの英語(CARモード)の迎えの連絡リマインドは、みつき本人には送らず
+      // 一志さん・きくみさんのみに送る(お迎えの手配を確認するのは親の役割のため)。
+      const recipients = data.personKey === 'MITSUKI'
+        ? getPersonNotifyRecipients_(config, 'MITSUKI').slice(1) // 本人(先頭)を除く
+        : getPersonNotifyRecipients_(config, data.personKey);
+      sendLinePushToRecipients_(recipients, message);
     } catch (err) {
       Logger.log('迎えの連絡リマインドの送信でエラー(' + data.label + '): ' + err.message);
     }
   });
 }
 
-// ==== 迎えの連絡リマインドのメッセージ文面(天気情報は付けない) ====
-function buildPickupReminderMessage_(personLabel, label, mode, endTime) {
+// ==== 迎えの連絡リマインドのメッセージ文面(天気情報は付けない。項目A4で文言を変更) ====
+function buildPickupReminderMessage_(label, endTime) {
   const endLabel = Utilities.formatDate(endTime, 'Asia/Tokyo', 'H:mm');
   const lines = [];
-  lines.push('【' + personLabel + '】' + label + ' 迎えの連絡リマインド');
-  if (mode === 'TRANSIT') {
-    // 項目B: 若林駅に着く目安(固定値のみで算出。calcYukiStationArrivalEstimate_、WeatherNotify_YukiLogic.gs)を本文に入れる
-    const stationArrivalLabel = Utilities.formatDate(calcYukiStationArrivalEstimate_(endTime), 'Asia/Tokyo', 'H:mm');
-    lines.push(label + 'は' + endLabel + 'ごろ終了予定です。若林駅に着く目安: ' + stationArrivalLabel + '頃。迎えの担当の方に連絡リマインドを。');
-  } else {
-    lines.push(label + 'は' + endLabel + 'ごろ終了予定です。迎えの担当の方に連絡リマインドしてください。');
-  }
+  lines.push('【みつき】' + label + ' 迎えの連絡リマインド');
+  lines.push(label + 'は' + endLabel + 'ごろ終了予定です。お迎えの手配を確認してください。');
   return lines.join('\n');
 }
 
@@ -745,6 +1048,7 @@ const BIKE_DEPARTURE_ALERT_PENDING_PREFIX_ = 'PENDING_BIKE_DEPARTURE_ALERT_';
 // ==== 確定版配信時に、出発まわりの通知でBIKEモードだった予定それぞれの出発直前アラートを予約する ====
 function scheduleBikeDepartureAlerts_(targetDate, calendarId, departureNoticesByPerson) {
   const leadMin = getBikeDepartureAlertLeadMin_();
+  const nowMs = Date.now(); // 項目A5: 「確定版の配信時刻」は、この関数が実行された時刻を基準にする
 
   ['YUKI', 'MITSUKI'].forEach(function (personKey) {
     const personLabel = personKey === 'YUKI' ? 'ゆうき' : 'みつき';
@@ -753,8 +1057,15 @@ function scheduleBikeDepartureAlerts_(targetDate, calendarId, departureNoticesBy
 
     bikeTargets.forEach(function (target, index) {
       const alertTime = new Date(target.departureTime.getTime() - leadMin * 60 * 1000);
-      if (alertTime.getTime() <= Date.now()) {
+      if (alertTime.getTime() <= nowMs) {
         Logger.log(personLabel + ': ' + target.label + '(出発目安 ' + target.departureTime + ')が近すぎる/過去のため、自転車の出発直前アラートは予約しませんでした。');
+        return;
+      }
+      // 項目A5: 直前アラートと同じ抑制ルール(確定版配信時刻の前後60分・仮値以内なら出さない)
+      const suppressMin = getCarPickupAlertSuppressNearFinalMin_();
+      if ((alertTime.getTime() - nowMs) / (60 * 1000) <= suppressMin) {
+        Logger.log(personLabel + ': ' + target.label + 'の自転車の出発直前アラート予定時刻(' + alertTime + ')が確定版配信時刻から' +
+          suppressMin + '分以内のため、予約しませんでした(項目A5)。');
         return;
       }
 

@@ -260,10 +260,12 @@ function testHomewardDepartureSmoke() {
 }
 
 /**
- * 出発まわりの通知(項目A)の対象抽出・メッセージ文面を、実カレンダーで確認する診断用関数。
+ * 出発まわりの通知(統合版。項目A2)の対象抽出・メッセージ文面を、実カレンダーで確認する診断用関数。
  * getDepartureNoticeTargets_の診断ログ([出発まわりの通知診断])に加えて、
- * 実際にdecideYukiDepartureNotices_/decideMitsukiDepartureNotices_/buildDepartureNoticeMessage_に
- * 通した結果(メッセージ文面)を出力する。
+ * 実際にdecideYukiDepartureNotices_/decideMitsukiCombinedNotices_/buildCombinedDepartureMessage_に
+ * 通した結果(1人1通に統合されたメッセージ文面)を出力する。確定版は暫定版スナップショットが
+ * 無い状態での試算のため、差分要約は常に「変更なし」になる点に注意(実際の確定版配信時は
+ * 暫定版のスナップショットと比較する。sendCombinedDepartureNotices_参照)。
  * 「明日」など相対日付だと実行時刻(特に深夜)によって対象日がずれるため、
  * targetDateの行を直接書き換えて、確認したい日付を指定してください。
  */
@@ -273,23 +275,20 @@ function testDepartureNoticeDiagnostic() {
   Logger.log('=== 対象日: ' + Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyy-MM-dd') + ' ===');
 
   [
-    { label: 'ゆうき', results: decideYukiDepartureNotices_(targetDate, calendarId) },
-    { label: 'みつき', results: decideMitsukiDepartureNotices_(targetDate, calendarId) },
+    { key: 'YUKI', label: 'ゆうき', sections: decideYukiDepartureNotices_(targetDate, calendarId) },
+    { key: 'MITSUKI', label: 'みつき', sections: decideMitsukiCombinedNotices_(targetDate, calendarId) },
   ].forEach(function (person) {
-    Logger.log(person.label + ': 出発まわりの通知対象件数=' + person.results.length);
-    person.results.forEach(function (result, i) {
-      Logger.log('--- ' + person.label + ' メッセージサンプル(' + (i + 1) + '件目、mode=' + result.mode + ') ---');
-      Logger.log(buildDepartureNoticeMessage_(targetDate, person.label, result, true, null));
-    });
+    Logger.log(person.label + ': 出発まわりの通知セクション数=' + person.sections.length +
+      '(' + person.sections.map(function (s) { return s.label + ':' + s.mode; }).join(', ') + ')');
+    if (person.sections.length === 0) {
+      Logger.log(person.label + ': 対象が無いため、この日は通知しません(項目A2)。');
+      return;
+    }
+    Logger.log('--- ' + person.label + ' 暫定版メッセージサンプル ---');
+    Logger.log(buildCombinedDepartureMessage_(targetDate, person.label, person.sections, false, null));
+    Logger.log('--- ' + person.label + ' 確定版メッセージサンプル(暫定版スナップショット無しのため差分は「変更なし」表示) ---');
+    Logger.log(buildCombinedDepartureMessage_(targetDate, person.label, person.sections, true, '変更なし'));
   });
-
-  const commuteResult = decideMitsukiSchoolCommute_(targetDate, calendarId);
-  if (commuteResult) {
-    Logger.log('--- みつき 登校(自転車通学)メッセージサンプル ---');
-    Logger.log(buildMitsukiSchoolCommuteMessage_(targetDate, commuteResult, true));
-  } else {
-    Logger.log('みつき: 対象日は登校日ではないため、登校(自転車通学)の出発時刻お知らせは対象外です。');
-  }
 }
 
 // ==== 本番と同じ処理を1回流す(WEATHER_DRY_RUN=trueならLINE送信されずログのみ) ====
@@ -359,47 +358,57 @@ function reportMessageVolumeEstimate(startOffsetDays, days) {
     const targetDate = new Date(new Date().setHours(0, 0, 0, 0) + (offset + i) * 24 * 60 * 60 * 1000);
 
     ['暫定', '確定'].forEach(function (version) {
-      // ゆうき: 登校 天気予報
+      // ゆうき: 登校 天気予報(既存、変更なし。暫定・確定とも常に送る)
       if (isYukiSchoolDay_(targetDate, calendarId)) {
         addForRecipients(getPersonNotifyRecipients_(config, 'YUKI'), '登校 天気予報(ゆうき)', version);
       }
-      // みつき: 登校 出発時刻のお知らせ
-      if (isMitsukiSchoolDay_(targetDate, calendarId)) {
-        addForRecipients(getPersonNotifyRecipients_(config, 'MITSUKI'), '登校 出発時刻のお知らせ(みつき)', version);
-      }
-      // 出発まわりの通知(暫定は対象件数分、確定は「変更があった場合のみ」のため
-      // ここでは保守的に「対象件数分すべて送るとしたら」の上限値として数える)
+      // 出発まわりの通知(項目A1・A2で改訂: 1人1通に統合。確定版も「常に送る」ため対象が
+      // あれば暫定・確定とも1通ずつとカウントする。みつきは登校(自転車通学)もこの1通に含まれる)
       const yukiDep = decideYukiDepartureNotices_(targetDate, calendarId);
-      yukiDep.forEach(function (r) {
-        addForRecipients(getPersonNotifyRecipients_(config, 'YUKI'),
-          '出発まわりの通知(ゆうき・' + r.mode + ')', version);
-      });
-      const mitsukiDep = decideMitsukiDepartureNotices_(targetDate, calendarId);
+      if (yukiDep.length > 0) {
+        addForRecipients(getPersonNotifyRecipients_(config, 'YUKI'), '出発まわりの通知(ゆうき・統合)', version);
+      }
+      const mitsukiDep = decideMitsukiCombinedNotices_(targetDate, calendarId);
+      if (mitsukiDep.length > 0) {
+        addForRecipients(getPersonNotifyRecipients_(config, 'MITSUKI'), '出発まわりの通知(みつき・統合)', version);
+      }
+
       mitsukiDep.forEach(function (r) {
-        addForRecipients(getPersonNotifyRecipients_(config, 'MITSUKI'),
-          '出発まわりの通知(みつき・' + r.mode + ')', version);
         if (version === '確定' && r.mode === 'CAR') {
           addForRecipients(getPersonNotifyRecipients_(config, 'MITSUKI'), '直前アラート(みつき)', version);
-          addForRecipients(getPersonNotifyRecipients_(config, 'MITSUKI'), '迎えの連絡リマインド(みつき)', version);
+          // 項目A4: 迎えの連絡リマインドはみつき本人には送らず、一志さん・きくみさんのみ
+          addForRecipients(getPersonNotifyRecipients_(config, 'MITSUKI').slice(1), '迎えの連絡リマインド(みつき)', version);
         }
         if (version === '確定' && r.mode === 'BIKE') {
           // 自転車の出発直前アラートは本人のみ(CCなし)
           addCount(getPersonNotifyRecipients_(config, 'MITSUKI')[0].channelLabel, '自転車の出発直前アラート(みつき)', version);
+          // 項目A6: 家庭発の習い事(お茶等)の帰りの雨雲アラート(英語はCARモードのため対象外)
+          if (isMitsukiLessonName_(r.label)) {
+            addForRecipients(getPersonNotifyRecipients_(config, 'MITSUKI'), '帰りの雨雲アラート・習い事(みつき)', version);
+          }
         }
       });
       yukiDep.forEach(function (r) {
         if (version === '確定' && (r.mode === 'CAR' || r.mode === 'TRANSIT')) {
           addForRecipients(getPersonNotifyRecipients_(config, 'YUKI'), '直前アラート(ゆうき)', version);
+        }
+        if (version === '確定' && r.mode === 'CAR') {
           addForRecipients(getPersonNotifyRecipients_(config, 'YUKI'), '迎えの連絡リマインド(ゆうき)', version);
+        }
+        if (version === '確定' && r.mode === 'TRANSIT') {
+          // 項目A3: 迎えの連絡+帰りの雨雲アラートに統合(CCはYUKI_STATION_NOTICE_CCでオンオフ可能)
+          addForRecipients(getYukiStationNoticeRecipients_(config), '迎えの連絡+帰りの雨雲アラート(ゆうき)', version);
         }
         if (version === '確定' && r.mode === 'BIKE') {
           addCount(getPersonNotifyRecipients_(config, 'YUKI')[0].channelLabel, '自転車の出発直前アラート(ゆうき)', version);
         }
       });
-      // 帰りの雨雲アラート(確定版配信時のみ予約される)
+      // 帰りの雨雲アラート(確定版配信時のみ予約される。項目A3: ゆうきは登校日のみ対象)
       if (version === '確定') {
-        const yukiHomeward = getHomewardDepartureTime_(targetDate, calendarId, '【ゆうき】', getYukiDefaultSchoolEnd_(), YUKI_LESSON_NAMES_);
-        if (yukiHomeward) addForRecipients(getPersonNotifyRecipients_(config, 'YUKI'), '帰りの雨雲アラート(ゆうき)', version);
+        if (isYukiSchoolDay_(targetDate, calendarId)) {
+          const yukiHomeward = getHomewardDepartureTime_(targetDate, calendarId, '【ゆうき】', getYukiDefaultSchoolEnd_(), YUKI_LESSON_NAMES_);
+          if (yukiHomeward) addForRecipients(getPersonNotifyRecipients_(config, 'YUKI'), '帰りの雨雲アラート(ゆうき)', version);
+        }
         const mitsukiHomeward = getHomewardDepartureTime_(targetDate, calendarId, '【みつき】', getMitsukiDefaultSchoolEnd_(), MITSUKI_LESSON_NAMES_);
         if (mitsukiHomeward) addForRecipients(getPersonNotifyRecipients_(config, 'MITSUKI'), '帰りの雨雲アラート(みつき)', version);
       }
@@ -407,7 +416,9 @@ function reportMessageVolumeEstimate(startOffsetDays, days) {
   }
 
   Logger.log('=== 通知件数集計(' + Utilities.formatDate(new Date(new Date().setHours(0, 0, 0, 0) + offset * 24 * 60 * 60 * 1000), 'Asia/Tokyo', 'yyyy-MM-dd') +
-    ' から ' + dayCount + '日分。確定版の「出発まわりの通知」は変更時のみ送信のため、ここでの件数は上限値です) ===');
+    ' から ' + dayCount + '日分。項目A1で確定版の「出発まわりの通知」は常に送るよう変更したため件数として確定的ですが、' +
+    '直前アラート・自転車の出発直前アラートは項目A5の抑制ルール(確定版配信時刻の前後60分・仮値以内なら出さない)を' +
+    'この集計では考慮していないため、その2種類については上限値です) ===');
   Object.keys(counts).sort().forEach(function (channelLabel) {
     Logger.log('--- ' + channelLabel + ' ---');
     let total = 0;
