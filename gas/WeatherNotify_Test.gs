@@ -241,12 +241,11 @@ function testHomewardDepartureSmoke() {
 
   ['ゆうき', 'みつき'].forEach(function (name) {
     const namePrefix = '【' + name + '】';
-    const personKey = name === 'ゆうき' ? 'YUKI' : 'MITSUKI';
     const defaultEnd = name === 'ゆうき' ? getYukiDefaultSchoolEnd_() : getMitsukiDefaultSchoolEnd_();
-    // 英語・お茶(家庭発の予定)、およびCARモードの予定(項目8: ゆうきの非登校日の部活等)は
-    // 帰り予定時刻の算出対象から除外する(本番と同じ条件)
+    // 英語・お茶(家庭発の予定)は帰り予定時刻の算出対象から除外する(本番と同じ条件)。
+    // ゆうきの非登校日の部活(TRANSITモード)は除外しない(項目A1で復元。getHomewardDepartureTime_のdocを参照)
     const excludeLabelKeywords = name === 'ゆうき' ? YUKI_LESSON_NAMES_ : MITSUKI_LESSON_NAMES_;
-    const result = getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultEnd, excludeLabelKeywords, personKey);
+    const result = getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultEnd, excludeLabelKeywords);
     if (!result) {
       Logger.log(name + ': 対象日は帰りの予定なし(登校日でもなく、時刻付きの予定も無い)');
     } else {
@@ -376,7 +375,8 @@ function reportMessageVolumeEstimate(startOffsetDays, days) {
         addForRecipients(getPersonNotifyRecipients_(config, 'MITSUKI'),
           '出発まわりの通知(みつき・' + r.mode + ')', version);
         if (version === '確定' && r.mode === 'CAR') {
-          addForRecipients(getPersonNotifyRecipients_(config, 'MITSUKI'), '車送迎の直前アラート(みつき)', version);
+          addForRecipients(getPersonNotifyRecipients_(config, 'MITSUKI'), '直前アラート(みつき)', version);
+          addForRecipients(getPersonNotifyRecipients_(config, 'MITSUKI'), '迎えの連絡リマインド(みつき)', version);
         }
         if (version === '確定' && r.mode === 'BIKE') {
           // 自転車の出発直前アラートは本人のみ(CCなし)
@@ -384,8 +384,9 @@ function reportMessageVolumeEstimate(startOffsetDays, days) {
         }
       });
       yukiDep.forEach(function (r) {
-        if (version === '確定' && r.mode === 'CAR') {
-          addForRecipients(getPersonNotifyRecipients_(config, 'YUKI'), '車送迎の直前アラート(ゆうき)', version);
+        if (version === '確定' && (r.mode === 'CAR' || r.mode === 'TRANSIT')) {
+          addForRecipients(getPersonNotifyRecipients_(config, 'YUKI'), '直前アラート(ゆうき)', version);
+          addForRecipients(getPersonNotifyRecipients_(config, 'YUKI'), '迎えの連絡リマインド(ゆうき)', version);
         }
         if (version === '確定' && r.mode === 'BIKE') {
           addCount(getPersonNotifyRecipients_(config, 'YUKI')[0].channelLabel, '自転車の出発直前アラート(ゆうき)', version);
@@ -393,9 +394,9 @@ function reportMessageVolumeEstimate(startOffsetDays, days) {
       });
       // 帰りの雨雲アラート(確定版配信時のみ予約される)
       if (version === '確定') {
-        const yukiHomeward = getHomewardDepartureTime_(targetDate, calendarId, '【ゆうき】', getYukiDefaultSchoolEnd_(), YUKI_LESSON_NAMES_, 'YUKI');
+        const yukiHomeward = getHomewardDepartureTime_(targetDate, calendarId, '【ゆうき】', getYukiDefaultSchoolEnd_(), YUKI_LESSON_NAMES_);
         if (yukiHomeward) addForRecipients(getPersonNotifyRecipients_(config, 'YUKI'), '帰りの雨雲アラート(ゆうき)', version);
-        const mitsukiHomeward = getHomewardDepartureTime_(targetDate, calendarId, '【みつき】', getMitsukiDefaultSchoolEnd_(), MITSUKI_LESSON_NAMES_, 'MITSUKI');
+        const mitsukiHomeward = getHomewardDepartureTime_(targetDate, calendarId, '【みつき】', getMitsukiDefaultSchoolEnd_(), MITSUKI_LESSON_NAMES_);
         if (mitsukiHomeward) addForRecipients(getPersonNotifyRecipients_(config, 'MITSUKI'), '帰りの雨雲アラート(みつき)', version);
       }
     });

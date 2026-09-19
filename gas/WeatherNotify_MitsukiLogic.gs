@@ -89,6 +89,9 @@ function getMitsukiSchoolCommuteTarget_(targetDate, calendarId) {
 /**
  * みつきさんの登校(自転車通学)の出発時刻お知らせを算出する(気象API・Mapsを実際に呼び出す)。
  * 送迎要否・徒歩提案は判定しない(buildMitsukiSchoolCommuteMessage_側でも参照しない)。
+ * 項目A3: 出発目安は天候によらず固定(既定7:50)にするため、雨天バッファではなく
+ * ARRIVAL_MARGIN_SCHOOL_MIN(既定10分)を余裕として使う。MITSUKI_RAIN_BUFFER_MINの既定値は
+ * 0に変更済み(getWeatherConfig_参照)のため、未設定であれば雨天バッファは実質かからない。
  * @return {Object|null} 対象日が登校日でなければnull。
  */
 function decideMitsukiSchoolCommute_(targetDate, calendarId) {
@@ -103,7 +106,7 @@ function decideMitsukiSchoolCommute_(targetDate, calendarId) {
   } catch (e) {
     Logger.log('降水確率の取得でエラー(みつき登校): ' + e.message);
   }
-  const bike = calcBikeDeparture_(target.startTime, travelMinutes, pop, config);
+  const bike = calcBikeDeparture_(target.startTime, travelMinutes, pop, config, getArrivalMarginSchoolMin_());
 
   return {
     label: target.label,
@@ -112,6 +115,7 @@ function decideMitsukiSchoolCommute_(targetDate, calendarId) {
     travelMinutes: bike.travelMinutes,
     isRaining: bike.isRaining,
     bufferMin: bike.bufferMin,
+    marginMin: bike.marginMin,
     pop: bike.pop,
     usedPop: bike.usedPop,
   };
@@ -130,7 +134,7 @@ function decideMitsukiDepartureNotices_(targetDate, calendarId) {
   const config = getWeatherConfig_();
   // 英語・お茶自体は「学校から家に向かう予定」ではない(いったん帰宅してから家庭発で出発する)ため、
   // 帰り予定時刻の算出対象からは除外する(MITSUKI_LESSON_NAMES_)。
-  const homeward = getHomewardDepartureTime_(targetDate, calendarId, '【みつき】', getMitsukiDefaultSchoolEnd_(), MITSUKI_LESSON_NAMES_, 'MITSUKI');
+  const homeward = getHomewardDepartureTime_(targetDate, calendarId, '【みつき】', getMitsukiDefaultSchoolEnd_(), MITSUKI_LESSON_NAMES_);
   return targets.map(function (target) {
     return calcDepartureNoticeDetails_(target, WEATHER_LOCATIONS_.HOME.address, homeward, config);
   });

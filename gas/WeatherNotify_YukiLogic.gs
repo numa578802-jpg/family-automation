@@ -34,6 +34,108 @@ function isYukiSchoolDay_(date, calendarId) {
 const YUKI_LESSON_NAMES_ = [];
 
 /**
+ * ゆうきさんの非登校日部活(TRANSITモード、項目A2)の経路:
+ *   自宅 →(車)若林駅 →(電車)刈谷市駅 →(徒歩)刈谷高校
+ * 家を出る目安 = 開始時刻 − 徒歩(刈谷市駅→刈谷高校) − 電車(若林駅→刈谷市駅) − 車(自宅→若林駅) − 駅での余裕
+ */
+// 車(自宅→若林駅)の移動時間が取得できない場合のフォールバック値(分。ユーザー申告値=25分)
+const YUKI_CAR_TO_STATION_FALLBACK_MIN_PROP_ = 'YUKI_CAR_TO_STATION_FALLBACK_MIN';
+const YUKI_CAR_TO_STATION_FALLBACK_MIN_FALLBACK_ = 25;
+
+function getYukiCarToStationFallbackMin_() {
+  const value = PropertiesService.getScriptProperties().getProperty(YUKI_CAR_TO_STATION_FALLBACK_MIN_PROP_);
+  const n = Number(value);
+  return value && !isNaN(n) ? n : YUKI_CAR_TO_STATION_FALLBACK_MIN_FALLBACK_;
+}
+
+// 徒歩(刈谷市駅→刈谷高校)の移動時間が取得できない場合のフォールバック値(分、仮値)
+const YUKI_WALK_FALLBACK_MIN_PROP_ = 'YUKI_WALK_FALLBACK_MIN';
+const YUKI_WALK_FALLBACK_MIN_FALLBACK_ = 10;
+
+function getYukiWalkFallbackMin_() {
+  const value = PropertiesService.getScriptProperties().getProperty(YUKI_WALK_FALLBACK_MIN_PROP_);
+  const n = Number(value);
+  return value && !isNaN(n) ? n : YUKI_WALK_FALLBACK_MIN_FALLBACK_;
+}
+
+// 電車(若林駅→刈谷市駅)の移動時間(分、仮値)。MapsのTRANSIT取得を試み、失敗時のフォールバックとして使う
+const YUKI_TRAIN_MIN_PROP_ = 'YUKI_TRAIN_MIN';
+const YUKI_TRAIN_MIN_FALLBACK_ = 10;
+
+function getYukiTrainMin_() {
+  const value = PropertiesService.getScriptProperties().getProperty(YUKI_TRAIN_MIN_PROP_);
+  const n = Number(value);
+  return value && !isNaN(n) ? n : YUKI_TRAIN_MIN_FALLBACK_;
+}
+
+// 駅での乗り換え・待ち時間等の余裕(分、仮値)
+const YUKI_STATION_BUFFER_MIN_PROP_ = 'YUKI_STATION_BUFFER_MIN';
+const YUKI_STATION_BUFFER_MIN_FALLBACK_ = 5;
+
+function getYukiStationBufferMin_() {
+  const value = PropertiesService.getScriptProperties().getProperty(YUKI_STATION_BUFFER_MIN_PROP_);
+  const n = Number(value);
+  return value && !isNaN(n) ? n : YUKI_STATION_BUFFER_MIN_FALLBACK_;
+}
+
+/**
+ * TRANSITモードの出発目安を算出する純粋関数(区間ごとの移動時間の合計を開始時刻から引くだけ)。
+ * ネットワークアクセスを行わないため、テストハーネスからモックデータで検証できる。
+ */
+function calcYukiTransitDepartureFromData_(startTime, carMin, trainMin, walkMin, stationBufferMin) {
+  const totalMin = carMin + trainMin + walkMin + stationBufferMin;
+  const departureTime = new Date(startTime.getTime() - totalMin * 60 * 1000);
+  return {
+    departureTime: departureTime,
+    carMin: carMin,
+    trainMin: trainMin,
+    walkMin: walkMin,
+    stationBufferMin: stationBufferMin,
+    totalMin: totalMin,
+  };
+}
+
+/**
+ * ゆうきさんの非登校日部活(TRANSITモード、項目A2)1件分の詳細を算出する(気象API・Mapsを実際に呼び出す)。
+ * 実際のデータ取得を行い、純粋関数calcYukiTransitDepartureFromData_に渡すだけの薄いラッパー
+ * (calcDepartureNoticeDetails_のTRANSIT版。CAR/BIKEと違いConfig.gs側では扱わず、
+ * ゆうきさん専用のためこのファイルに置く)。
+ * @param {Object} target getDepartureNoticeTargets_の要素({label, startTime, endTime, mode:'TRANSIT'})
+ * @return {Object} label, mode, startTime, endTime, departureTime, carMin, trainMin, walkMin, stationBufferMin, pop
+ */
+function calcYukiTransitDetails_(target) {
+  const carMin = getDrivingTravelMinutes_(WEATHER_LOCATIONS_.HOME.address, WEATHER_LOCATIONS_.STATION_WAKABAYASHI.address,
+    getYukiCarToStationFallbackMin_());
+  const trainMin = getTransitTravelMinutes_(WEATHER_LOCATIONS_.STATION_WAKABAYASHI.address, WEATHER_LOCATIONS_.STATION_KARIYASHI.address,
+    getYukiTrainMin_());
+  const walkMin = getWalkingTravelMinutes_(WEATHER_LOCATIONS_.STATION_KARIYASHI.address, WEATHER_LOCATIONS_.SCHOOL_YUKI.address,
+    getYukiWalkFallbackMin_());
+  const stationBufferMin = getYukiStationBufferMin_();
+  const base = calcYukiTransitDepartureFromData_(target.startTime, carMin, trainMin, walkMin, stationBufferMin);
+
+  let pop = null;
+  try {
+    pop = getPrecipitationProbabilityAt_(target.startTime);
+  } catch (e) {
+    Logger.log('降水確率の取得でエラー(ゆうき・出発まわりの通知TRANSIT・' + target.label + '): ' + e.message);
+  }
+
+  return {
+    label: target.label,
+    mode: 'TRANSIT',
+    startTime: target.startTime,
+    endTime: target.endTime,
+    departureTime: base.departureTime,
+    carMin: carMin,
+    trainMin: trainMin,
+    walkMin: walkMin,
+    stationBufferMin: stationBufferMin,
+    pop: pop,
+    usedPop: pop !== null,
+  };
+}
+
+/**
  * ゆうきさんのバス/自転車判定を行う(気象APIを実際に呼び出す)。朝・帰り両方を判定する。
  * @param {Date} targetDate 登校日(対象日)
  * @param {boolean} useNowcast trueの場合、朝の判定にYOLPナウキャストによる雨雲判定も行う(当日6:30通知用)
@@ -65,7 +167,7 @@ function decideYukiTransport_(targetDate, useNowcast, calendarId) {
   const morning = evaluateRainCondition_(morningPop, morningRainSpots, config);
 
   // 帰り(下校)。時間的に離れているためナウキャストは使わず、降水確率のみで判定する。
-  const homeward = getHomewardDepartureTime_(targetDate, calendarId, '【ゆうき】', getYukiDefaultSchoolEnd_(), YUKI_LESSON_NAMES_, 'YUKI');
+  const homeward = getHomewardDepartureTime_(targetDate, calendarId, '【ゆうき】', getYukiDefaultSchoolEnd_(), YUKI_LESSON_NAMES_);
   let afternoon = { rainy: false, reasons: [], pop: null, usedPop: false, usedNowcast: false };
   let homewardTime = null;
   let homewardLabel = null;
@@ -113,9 +215,11 @@ function decideYukiTransportFromData_(pop, rainSpotDetails, config) {
 
 /**
  * ゆうきさんの「出発まわりの通知」(項目A)対象を算出する(気象API・Mapsを実際に呼び出す)。
- * 非登校日の時刻付き予定(部活等)が対象。登校日はYUKI_LESSON_NAMES_が空のため対象が無い
- * (=このまま常に空配列を返す。将来、家から向かう習い事が増えた場合はYUKI_LESSON_NAMES_に追加する)。
- * @return {Array<Object>} calcDepartureNoticeDetails_の戻り値の配列。対象予定が無い日は空配列。
+ * 非登校日の時刻付き予定(部活等)が対象で、TRANSITモード(項目A2)になる
+ * (自宅→(車)若林駅→(電車)刈谷市駅→(徒歩)学校。calcYukiTransitDetails_参照)。
+ * 登校日はYUKI_LESSON_NAMES_が空のため対象が無い(=このまま常に空配列を返す。将来、
+ * 家から向かう習い事が増えた場合はYUKI_LESSON_NAMES_に追加する。その場合はBIKEモードになる)。
+ * @return {Array<Object>} calcDepartureNoticeDetails_/calcYukiTransitDetails_の戻り値の配列。対象予定が無い日は空配列。
  */
 function decideYukiDepartureNotices_(targetDate, calendarId) {
   const isSchool = isYukiSchoolDay_(targetDate, calendarId);
@@ -124,8 +228,11 @@ function decideYukiDepartureNotices_(targetDate, calendarId) {
   if (targets.length === 0) return [];
 
   const config = getWeatherConfig_();
-  const homeward = getHomewardDepartureTime_(targetDate, calendarId, '【ゆうき】', getYukiDefaultSchoolEnd_(), YUKI_LESSON_NAMES_, 'YUKI');
+  const homeward = getHomewardDepartureTime_(targetDate, calendarId, '【ゆうき】', getYukiDefaultSchoolEnd_(), YUKI_LESSON_NAMES_);
   return targets.map(function (target) {
+    if (target.mode === 'TRANSIT') {
+      return calcYukiTransitDetails_(target);
+    }
     return calcDepartureNoticeDetails_(target, WEATHER_LOCATIONS_.HOME.address, homeward, config);
   });
 }

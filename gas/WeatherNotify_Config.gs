@@ -26,16 +26,28 @@
  *                                        ゆうきさん向け・みつきさん向け、それぞれの通知が同一内容で2通届く。
  *   YUKI_POP_THRESHOLD                 … バス推奨とする降水確率(%)のしきい値(デフォルト50)
  *   YUKI_RAIN_INTENSITY_THRESHOLD_MMH  … バス推奨とする雨雲の降水強度しきい値(mm/h、デフォルト1)
- *   MITSUKI_RAIN_BUFFER_MIN            … 雨天時に追加する移動バッファ(分、デフォルト10)
+ *   MITSUKI_RAIN_BUFFER_MIN            … 雨天時に追加する移動バッファ(分、デフォルト0。項目A3で10→0に変更。
+ *                                        雨天でも登校の出発目安は変えない方針のため、既定では効かない。
+ *                                        雨天時にバッファを持たせたい場合のみ、このプロパティを設定する)
  *   MITSUKI_DEFAULT_TRAVEL_MIN         … 自転車移動時間が取得できない場合のフォールバック値(分、デフォルト15)
  *   YUKI_DEFAULT_SCHOOL_END            … ゆうきさんの通常下校時刻(部活が無い日の下校時刻。デフォルト17:00)
  *   MITSUKI_DEFAULT_SCHOOL_END         … みつきさんの通常下校時刻(部活が無い日の下校時刻。デフォルト16:00)
  *   HOMEWARD_ALERT_LEAD_MIN            … 「帰りの雨雲通過予報」を帰り予定時刻の何分前に送るか(デフォルト30)
- *   CAR_PICKUP_ALERT_LEAD_MIN          … 車送迎の直前アラートを、予定開始の何分前に送るか(デフォルト60)
+ *   CAR_PICKUP_ALERT_LEAD_MIN          … 車送迎・TRANSIT(ゆうき)の直前アラートを、家を出る目安の何分前に送るか(デフォルト60)
  *   BIKE_DEPARTURE_ALERT_LEAD_MIN      … 自転車の出発直前アラート(本人のみ)を、出発目安の何分前に送るか(デフォルト30、仮値)
- *   ARRIVAL_MARGIN_MIN                 … 出発目安の計算に加える「到着の余裕」(分、デフォルト0)
+ *   PICKUP_REMINDER_LEAD_MIN_CAR       … 車送迎(CARモード)の迎えの連絡リマインドを、終了時刻の何分前に送るか(デフォルト30、仮値)
+ *   ARRIVAL_MARGIN_MIN                 … 出発まわりの通知(習い事・部活等、自転車)の出発目安の計算に加える「到着の余裕」(分、デフォルト0)
+ *   ARRIVAL_MARGIN_SCHOOL_MIN          … みつきさんの登校(自転車通学)専用の「到着の余裕」(分、デフォルト10。項目A3で新設。
+ *                                        雨天でも出発目安を7:50固定にするため、雨天バッファの代わりにこちらを使う)
  *   CAR_TRAVEL_MINUTES_DEFAULT         … 車送迎(CARモード)の出発目安を計算する際の移動時間の仮値(分、デフォルト10)
  *   CAR_EVENT_DEFAULT_DURATION_MIN     … 車送迎の予定に終了時刻が無い場合の所要時間の仮値(分、デフォルト90)
+ *   YUKI_CAR_TO_STATION_FALLBACK_MIN   … ゆうきさんの非登校日部活(TRANSITモード)、自宅→若林駅の車移動時間が
+ *                                        取得できない場合のフォールバック値(分、デフォルト25。ユーザー申告値)
+ *   YUKI_WALK_FALLBACK_MIN             … 同、刈谷市駅→刈谷高校の徒歩移動時間が取得できない場合のフォールバック値(分、デフォルト10、仮値)
+ *   YUKI_TRAIN_MIN                     … 同、若林駅→刈谷市駅の電車移動時間(分、デフォルト10、仮値)。
+ *                                        Maps(TRANSITモード)での取得を試み、失敗時のフォールバックとして使う。
+ *                                        TRANSITモードでの実際の取得可否はサンドボックスでは検証不能なため未検証(B1参照ではなくA2の報告参照)
+ *   YUKI_STATION_BUFFER_MIN            … 同、駅での乗り換え・待ち時間等の余裕(分、デフォルト5、仮値)
  * ------------------------------------------------------------
  */
 
@@ -87,7 +99,7 @@ function getWeatherConfig_() {
     lineUserIdKikumi: props.getProperty('LINE_USER_ID_KIKUMI') || '',
     popThreshold: numOr(props.getProperty('YUKI_POP_THRESHOLD'), 50),
     rainIntensityThresholdMmh: numOr(props.getProperty('YUKI_RAIN_INTENSITY_THRESHOLD_MMH'), 1),
-    mitsukiRainBufferMin: numOr(props.getProperty('MITSUKI_RAIN_BUFFER_MIN'), 10),
+    mitsukiRainBufferMin: numOr(props.getProperty('MITSUKI_RAIN_BUFFER_MIN'), 0),
     mitsukiDefaultTravelMin: numOr(props.getProperty('MITSUKI_DEFAULT_TRAVEL_MIN'), 15),
     homewardAlertLeadMin: numOr(props.getProperty('HOMEWARD_ALERT_LEAD_MIN'), 30),
   };
@@ -230,14 +242,15 @@ function evaluateRainCondition_(pop, rainSpotDetails, config) {
  * 対象日の「学校(または活動場所)から家に向かって出発する時刻」を、ゆうき・みつき共通で算出する。
  * ルール:
  *   1. 対象日に時刻付きの【namePrefix】予定(部活動等、学校発の予定)があれば、最も遅く終わる予定の
- *      終了時刻を採用する。ただし次のいずれかに該当する予定は候補から除外する。
- *      (a) 予定名がexcludeLabelKeywordsのいずれかを含む(英語・お茶のような、いったん家に帰ってから
- *          改めて家庭から出発する予定。「学校から家に向かう時刻」の計算には含めない)。
- *      (b) その予定の移動手段(getEventTransportMode_)が'CAR'(車送迎固定)である(例: ゆうきの非登校日の
- *          部活は項目8により車送迎固定になったため、自転車ルートの雨雲予報である「帰りの雨雲アラート」の
- *          基準には使わない。車で送迎される日は、その情報自体が意味を持たないため)。
- *      これらを除外しないと、実際の帰り時刻より大幅に遅い(または無関係な)時刻が「帰り予定」として
- *      算出されてしまい、帰りの雨雲アラートの発火予約が大きくずれるバグになる(過去に発生した実例)。
+ *      終了時刻を採用する。ただし予定名がexcludeLabelKeywordsのいずれかを含む場合は候補から除外する
+ *      (英語・お茶のような、いったん家に帰ってから改めて家庭から出発する予定は、
+ *      「学校から家に向かう時刻」の計算には含めない。含めてしまうと、実際の帰り時刻より大幅に遅い
+ *      時刻が「帰り予定」として算出されてしまい、帰りの雨雲アラートの発火予約が大きくずれるバグになる。
+ *      過去に発生した実例)。
+ *      ※ゆうきさんの非登校日の部活には、この除外は適用しない(項目A1)。ゆうきさんの土日祝・長期休暇の
+ *      部活は、行き帰りとも電車・徒歩区間を含む経路(TRANSITモード。decideYukiDepartureNotices_参照)の
+ *      ため、「学校から家に向かう時刻」という考え方自体は成立する(車で送迎されるのは最寄り駅までの
+ *      区間のみ)。そのため、この予定の終了時刻は引き続き帰りの雨雲アラートの基準として使う。
  *   2. 該当する予定が1件も無い場合のみ、対象日が登校日であればdefaultTimeStr(通常の下校時刻)を採用する。
  *      (予定があるのに既定時刻と比較して遅い方を採る、という処理は行わない。部活が既定時刻より早く
  *      終わる日は、その部活の終了時刻をそのまま採用する)
@@ -247,14 +260,12 @@ function evaluateRainCondition_(pop, rainSpotDetails, config) {
  * @param {string} namePrefix '【ゆうき】' または '【みつき】'
  * @param {string} defaultTimeStr 通常下校時刻(例: '17:00')
  * @param {string[]} [excludeLabelKeywords] この文字列のいずれかを予定名に含む場合、候補から除外する(部分一致)
- * @param {string} [personKey] 'YUKI'または'MITSUKI'。CARモード判定(getEventTransportMode_)に使う
  * @return {{time: Date, source: 'calendar'|'default', label: string}|null}
  */
-function getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultTimeStr, excludeLabelKeywords, personKey) {
+function getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultTimeStr, excludeLabelKeywords) {
   const dateStr = Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyy-MM-dd');
   const dayStart = new Date(dateStr + 'T00:00:00');
   const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
-  const isSchool = isSchoolDay_(targetDate, calendarId, namePrefix);
 
   let latestEventEnd = null;
   let latestEventLabel = null;
@@ -265,7 +276,6 @@ function getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultTi
       if (ev.getTitle().indexOf(namePrefix) !== 0 || ev.isAllDayEvent()) return;
       const label = ev.getTitle().replace(namePrefix, '');
       if (excludeLabelKeywords && excludeLabelKeywords.some(function (kw) { return label.indexOf(kw) !== -1; })) return;
-      if (personKey && getEventTransportMode_(label, personKey, isSchool) === 'CAR') return;
       const end = ev.getEndTime();
       if (!latestEventEnd || end > latestEventEnd) {
         latestEventEnd = end;
@@ -280,6 +290,7 @@ function getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultTi
     return { time: latestEventEnd, source: 'calendar', label: latestEventLabel };
   }
 
+  const isSchool = isSchoolDay_(targetDate, calendarId, namePrefix);
   if (isSchool) {
     return { time: new Date(dateStr + 'T' + defaultTimeStr + ':00'), source: 'default', label: '通常下校' };
   }
@@ -288,10 +299,11 @@ function getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultTi
 
 /**
  * 予定名(キーワード部分一致)→移動手段の対応表(項目A-2)。
- * 一致しなければ既定は'BIKE'(自転車)。ただし、ゆうきさんの非登校日の予定は既定を'CAR'に切り替える
- * (項目8: 実態として土日祝・長期休暇の部活はほぼ常に車送迎のため)。'CAR'は自転車換算・降水判定・
- * カッパ準備・送迎要否判断を一切行わず、常に車での送迎を前提とした「連絡リマインド」型の文面になる
- * (buildDepartureNoticeMessage_参照)。「英語(塾)」のように括弧書きが付く場合があるため部分一致で判定する。
+ * 一致しなければ既定は'BIKE'(自転車)。ゆうきさんの非登校日の予定は既定を'TRANSIT'に切り替える
+ * (項目A2: 自宅→(車)若林駅→(電車)刈谷市駅→(徒歩)学校という経路のため。単純な車固定=CARではない。
+ * calcYukiTransitDeparture_参照)。'CAR'は自転車換算・降水判定・カッパ準備・送迎要否判断を一切行わず、
+ * 常に車での送迎を前提とした「連絡リマインド」型の文面になる(buildDepartureNoticeMessage_参照)。
+ * 「英語(塾)」のように括弧書きが付く場合があるため部分一致で判定する。
  * @param {string} label 予定名(【ゆうき】等のタグを除いた部分)
  * @param {string} [personKey] 'YUKI'または'MITSUKI'
  * @param {boolean} [isSchoolDayFlag] 対象日が登校日かどうか
@@ -305,7 +317,7 @@ function getEventTransportMode_(label, personKey, isSchoolDayFlag) {
   for (let i = 0; i < keys.length; i++) {
     if (label.indexOf(keys[i]) !== -1) return EVENT_TRANSPORT_MODE_KEYWORDS_[keys[i]];
   }
-  if (personKey === 'YUKI' && !isSchoolDayFlag) return 'CAR';
+  if (personKey === 'YUKI' && !isSchoolDayFlag) return 'TRANSIT';
   return 'BIKE';
 }
 
@@ -317,6 +329,16 @@ function getCarPickupAlertLeadMin_() {
   const value = PropertiesService.getScriptProperties().getProperty(CAR_PICKUP_ALERT_LEAD_MIN_PROP_);
   const n = Number(value);
   return value && !isNaN(n) ? n : CAR_PICKUP_ALERT_LEAD_MIN_FALLBACK_;
+}
+
+// ==== 車送迎(CARモード)の迎えの連絡リマインドを、終了時刻の何分前に送るか(項目A5・仮値) ====
+const PICKUP_REMINDER_LEAD_MIN_CAR_PROP_ = 'PICKUP_REMINDER_LEAD_MIN_CAR';
+const PICKUP_REMINDER_LEAD_MIN_CAR_FALLBACK_ = 30;
+
+function getPickupReminderLeadMinCar_() {
+  const value = PropertiesService.getScriptProperties().getProperty(PICKUP_REMINDER_LEAD_MIN_CAR_PROP_);
+  const n = Number(value);
+  return value && !isNaN(n) ? n : PICKUP_REMINDER_LEAD_MIN_CAR_FALLBACK_;
 }
 
 // ==== 自転車の出発直前アラート(本人のみ、CCなし)を、出発目安の何分前に送るか(項目9・仮値) ====
@@ -337,6 +359,16 @@ function getArrivalMarginMin_() {
   const value = PropertiesService.getScriptProperties().getProperty(ARRIVAL_MARGIN_MIN_PROP_);
   const n = Number(value);
   return value && !isNaN(n) ? n : ARRIVAL_MARGIN_MIN_FALLBACK_;
+}
+
+// ==== 到着の余裕(みつきさんの登校・自転車通学専用。項目A3。初期値10=雨天でも出発目安を7:50固定にするため) ====
+const ARRIVAL_MARGIN_SCHOOL_MIN_PROP_ = 'ARRIVAL_MARGIN_SCHOOL_MIN';
+const ARRIVAL_MARGIN_SCHOOL_MIN_FALLBACK_ = 10;
+
+function getArrivalMarginSchoolMin_() {
+  const value = PropertiesService.getScriptProperties().getProperty(ARRIVAL_MARGIN_SCHOOL_MIN_PROP_);
+  const n = Number(value);
+  return value && !isNaN(n) ? n : ARRIVAL_MARGIN_SCHOOL_MIN_FALLBACK_;
 }
 
 // ==== 車送迎(CARモード)の出発目安・お迎え目安を計算する際の仮値(項目1) ====
@@ -374,7 +406,7 @@ function getCarEventDefaultDurationMin_() {
  * @param {string[]} householdLessonKeywords 登校日に対象とする、家から向かう習い事名のキーワード一覧(部分一致)
  * @param {string} defaultDestinationAddress 予定にlocationが無い場合の目的地(通常は学校の住所)
  * @param {string} personKey 'YUKI'または'MITSUKI'(移動手段の判定に使う。getEventTransportMode_参照)
- * @return {Array<{label:string, startTime:Date, endTime:Date, destinationAddress:string, mode:'CAR'|'BIKE'}>}
+ * @return {Array<{label:string, startTime:Date, endTime:Date, destinationAddress:string, mode:'CAR'|'BIKE'|'TRANSIT'}>}
  */
 function getDepartureNoticeTargets_(targetDate, calendarId, namePrefix, isSchoolDayFlag, householdLessonKeywords, defaultDestinationAddress, personKey) {
   const dateStr = Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyy-MM-dd');
@@ -417,13 +449,15 @@ function getDepartureNoticeTargets_(targetDate, calendarId, namePrefix, isSchool
  * 予定開始時刻・自転車移動時間・降水確率から出発時刻を算出する純粋関数(自転車移動共通部分)。
  * ネットワークアクセスを行わないため、テストハーネスからモックデータで検証できる。
  * みつきさんの登校(自転車通学、項目B)・出発まわりの通知(項目A・BIKEモード)の両方で使う。
- * 式(項目2): 出発目安 = 開始時刻 − 自転車の移動時間 − 雨天バッファ − 到着の余裕(ARRIVAL_MARGIN_MIN)。
- * 到着の余裕は初期値0分(みつきさんは開始ちょうどに着く実態のため)。
+ * 式(項目2・項目A3で改訂): 出発目安 = 開始時刻 − 自転車の移動時間 − 雨天バッファ − 到着の余裕(marginMin)。
+ * marginMinは呼び出し側が明示的に渡す(項目A3: 登校はARRIVAL_MARGIN_SCHOOL_MIN=10固定、
+ * 習い事・部活はARRIVAL_MARGIN_MIN=0のまま。登校の出発目安を天候によらず7:50固定にするため、
+ * 雨天バッファではなくこちらの余裕分で吸収する方針)。
+ * @param {number} marginMin 到着の余裕(分)。呼び出し側でgetArrivalMarginMin_()/getArrivalMarginSchoolMin_()等から渡す
  */
-function calcBikeDeparture_(startTime, travelMinutes, pop, config) {
+function calcBikeDeparture_(startTime, travelMinutes, pop, config, marginMin) {
   const isRaining = pop !== null && pop >= config.popThreshold;
   const bufferMin = isRaining ? config.mitsukiRainBufferMin : 0;
-  const marginMin = getArrivalMarginMin_();
   const departureTime = new Date(startTime.getTime() - (travelMinutes + bufferMin + marginMin) * 60 * 1000);
   return {
     departureTime: departureTime,
@@ -461,13 +495,14 @@ function calcDepartureNoticeDetailsFromData_(target, travelMinutes, pop, returnP
       label: target.label,
       mode: 'CAR',
       startTime: target.startTime,
+      endTime: target.endTime, // 項目A5: 迎えの連絡リマインド(schedulePickupReminders_)がこのendTimeを基準にする
       departureTime: departureTime,
       travelMinutes: carTravelMinutes,
       pickupTime: pickupTime,
     };
   }
 
-  const bike = calcBikeDeparture_(target.startTime, travelMinutes, pop, config);
+  const bike = calcBikeDeparture_(target.startTime, travelMinutes, pop, config, getArrivalMarginMin_());
   const go = evaluateRainCondition_(pop, [], config);
   const ret = evaluateRainCondition_(returnPop, [], config);
   const escortNeeded = go.rainy || ret.rainy;
