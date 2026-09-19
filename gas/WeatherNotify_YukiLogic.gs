@@ -34,11 +34,31 @@ function isYukiSchoolDay_(date, calendarId) {
 const YUKI_LESSON_NAMES_ = [];
 
 /**
- * ゆうきさんの非登校日部活(TRANSITモード、項目A2)の経路:
- *   自宅 →(車)若林駅 →(電車)刈谷市駅 →(徒歩)刈谷高校
- * 家を出る目安 = 開始時刻 − 徒歩(刈谷市駅→刈谷高校) − 電車(若林駅→刈谷市駅) − 車(自宅→若林駅) − 駅での余裕
+ * ゆうきさんの非登校日部活(TRANSITモード、項目A2・今回改訂=項目A)の経路:
+ *   行き: 自宅 →(車)若林駅 →(電車)刈谷市駅 →(徒歩)刈谷高校
+ *   帰り: 刈谷高校 →(徒歩)刈谷市駅 →(電車)若林駅 →(車で迎え)自宅
+ *
+ * 家を出る目安 = 開始時刻
+ *   − 徒歩(刈谷市駅→刈谷高校、YUKI_WALK_FALLBACK_MIN)
+ *   − 徒歩の余裕(YUKI_WALK_MARGIN_MIN)
+ *   − 電車(若林駅→刈谷市駅、YUKI_TRAIN_MIN)
+ *   − 若林駅の余裕(YUKI_STATION_BUFFER_MIN。車→電車の乗り継ぎのため)
+ *   − 車(自宅→若林駅、YUKI_CAR_TO_STATION_FALLBACK_MIN)
+ *   − 車の余裕(YUKI_CAR_MARGIN_MIN)
+ *
+ * 若林駅に着く目安(迎えの連絡リマインドで案内) = 部活の終了時刻
+ *   + 徒歩(学校→刈谷市駅、YUKI_WALK_FALLBACK_MIN) + 徒歩の余裕(YUKI_WALK_MARGIN_MIN)
+ *   + 電車の待ち(YUKI_TRAIN_WAIT_MIN) + 電車(YUKI_TRAIN_MIN)
+ *
+ * 2026/9/21(月)朝のGoogleマップ・Yahoo!乗換案内での実地検索値(ユーザー確認済み):
+ *   若林駅→刈谷市駅: 26分(知立で乗換1回、待ち含む。列車は15分間隔)
+ *   刈谷市駅→刈谷高校: 徒歩7分(500m)
+ *   自宅→若林駅: 車25分(ユーザー申告)
+ * これらの検索値をYUKI_TRAIN_MIN/YUKI_WALK_FALLBACK_MIN/YUKI_CAR_TO_STATION_FALLBACK_MINの
+ * 既定値として採用した。採用する値は常にこれらの固定値(スクリプトプロパティ)を優先し、
+ * Mapsの実測値は比較のためログに出すのみで、計算には使わない方針に変更した(calcYukiTransitDetails_参照)。
  */
-// 車(自宅→若林駅)の移動時間が取得できない場合のフォールバック値(分。ユーザー申告値=25分)
+// 車(自宅→若林駅)の所要時間(分)。ユーザー申告値=25分。固定値として採用する(Mapsの結果はログ比較のみ)
 const YUKI_CAR_TO_STATION_FALLBACK_MIN_PROP_ = 'YUKI_CAR_TO_STATION_FALLBACK_MIN';
 const YUKI_CAR_TO_STATION_FALLBACK_MIN_FALLBACK_ = 25;
 
@@ -48,9 +68,19 @@ function getYukiCarToStationFallbackMin_() {
   return value && !isNaN(n) ? n : YUKI_CAR_TO_STATION_FALLBACK_MIN_FALLBACK_;
 }
 
-// 徒歩(刈谷市駅→刈谷高校)の移動時間が取得できない場合のフォールバック値(分、仮値)
+// 車の余裕(分、仮値、新設)。駐車・乗降等の余裕
+const YUKI_CAR_MARGIN_MIN_PROP_ = 'YUKI_CAR_MARGIN_MIN';
+const YUKI_CAR_MARGIN_MIN_FALLBACK_ = 5;
+
+function getYukiCarMarginMin_() {
+  const value = PropertiesService.getScriptProperties().getProperty(YUKI_CAR_MARGIN_MIN_PROP_);
+  const n = Number(value);
+  return value && !isNaN(n) ? n : YUKI_CAR_MARGIN_MIN_FALLBACK_;
+}
+
+// 徒歩(刈谷市駅→刈谷高校)の所要時間(分)。2026/9/21朝の実地検索値=7分(500m)を既定値として採用
 const YUKI_WALK_FALLBACK_MIN_PROP_ = 'YUKI_WALK_FALLBACK_MIN';
-const YUKI_WALK_FALLBACK_MIN_FALLBACK_ = 10;
+const YUKI_WALK_FALLBACK_MIN_FALLBACK_ = 7;
 
 function getYukiWalkFallbackMin_() {
   const value = PropertiesService.getScriptProperties().getProperty(YUKI_WALK_FALLBACK_MIN_PROP_);
@@ -58,9 +88,19 @@ function getYukiWalkFallbackMin_() {
   return value && !isNaN(n) ? n : YUKI_WALK_FALLBACK_MIN_FALLBACK_;
 }
 
-// 電車(若林駅→刈谷市駅)の移動時間(分、仮値)。MapsのTRANSIT取得を試み、失敗時のフォールバックとして使う
+// 徒歩の余裕(分、仮値、新設)
+const YUKI_WALK_MARGIN_MIN_PROP_ = 'YUKI_WALK_MARGIN_MIN';
+const YUKI_WALK_MARGIN_MIN_FALLBACK_ = 5;
+
+function getYukiWalkMarginMin_() {
+  const value = PropertiesService.getScriptProperties().getProperty(YUKI_WALK_MARGIN_MIN_PROP_);
+  const n = Number(value);
+  return value && !isNaN(n) ? n : YUKI_WALK_MARGIN_MIN_FALLBACK_;
+}
+
+// 電車(若林駅→刈谷市駅)の所要時間(分)。2026/9/21朝の実地検索値=26分(知立乗換1回、待ち含む)を既定値として採用
 const YUKI_TRAIN_MIN_PROP_ = 'YUKI_TRAIN_MIN';
-const YUKI_TRAIN_MIN_FALLBACK_ = 10;
+const YUKI_TRAIN_MIN_FALLBACK_ = 26;
 
 function getYukiTrainMin_() {
   const value = PropertiesService.getScriptProperties().getProperty(YUKI_TRAIN_MIN_PROP_);
@@ -68,9 +108,9 @@ function getYukiTrainMin_() {
   return value && !isNaN(n) ? n : YUKI_TRAIN_MIN_FALLBACK_;
 }
 
-// 駅での乗り換え・待ち時間等の余裕(分、仮値)
+// 若林駅の余裕(分、仮値)。車を降りて電車に乗るまでの乗り継ぎ余裕。列車が15分間隔のため10分に変更
 const YUKI_STATION_BUFFER_MIN_PROP_ = 'YUKI_STATION_BUFFER_MIN';
-const YUKI_STATION_BUFFER_MIN_FALLBACK_ = 5;
+const YUKI_STATION_BUFFER_MIN_FALLBACK_ = 10;
 
 function getYukiStationBufferMin_() {
   const value = PropertiesService.getScriptProperties().getProperty(YUKI_STATION_BUFFER_MIN_PROP_);
@@ -78,40 +118,74 @@ function getYukiStationBufferMin_() {
   return value && !isNaN(n) ? n : YUKI_STATION_BUFFER_MIN_FALLBACK_;
 }
 
+// 電車の待ち(分、仮値、新設)。帰り、刈谷市駅で電車に乗るまでの待ち時間(若林駅の余裕とは別、帰り専用)
+const YUKI_TRAIN_WAIT_MIN_PROP_ = 'YUKI_TRAIN_WAIT_MIN';
+const YUKI_TRAIN_WAIT_MIN_FALLBACK_ = 10;
+
+function getYukiTrainWaitMin_() {
+  const value = PropertiesService.getScriptProperties().getProperty(YUKI_TRAIN_WAIT_MIN_PROP_);
+  const n = Number(value);
+  return value && !isNaN(n) ? n : YUKI_TRAIN_WAIT_MIN_FALLBACK_;
+}
+
 /**
- * TRANSITモードの出発目安を算出する純粋関数(区間ごとの移動時間の合計を開始時刻から引くだけ)。
+ * TRANSITモードの出発目安を算出する純粋関数(区間ごとの移動時間・余裕の合計を開始時刻から引くだけ)。
  * ネットワークアクセスを行わないため、テストハーネスからモックデータで検証できる。
  */
-function calcYukiTransitDepartureFromData_(startTime, carMin, trainMin, walkMin, stationBufferMin) {
-  const totalMin = carMin + trainMin + walkMin + stationBufferMin;
+function calcYukiTransitDepartureFromData_(startTime, carMin, carMarginMin, trainMin, stationBufferMin, walkMin, walkMarginMin) {
+  const totalMin = carMin + carMarginMin + trainMin + stationBufferMin + walkMin + walkMarginMin;
   const departureTime = new Date(startTime.getTime() - totalMin * 60 * 1000);
   return {
     departureTime: departureTime,
     carMin: carMin,
+    carMarginMin: carMarginMin,
     trainMin: trainMin,
-    walkMin: walkMin,
     stationBufferMin: stationBufferMin,
+    walkMin: walkMin,
+    walkMarginMin: walkMarginMin,
     totalMin: totalMin,
   };
 }
 
 /**
- * ゆうきさんの非登校日部活(TRANSITモード、項目A2)1件分の詳細を算出する(気象API・Mapsを実際に呼び出す)。
+ * 若林駅に着く目安(帰り)を算出する純粋関数。迎えの連絡リマインドの本文で使う(項目B)。
+ * ネットワークアクセスを行わないため、テストハーネスからモックデータで検証できる。
+ */
+function calcYukiStationArrivalEstimateFromData_(endTime, walkMin, walkMarginMin, trainWaitMin, trainMin) {
+  const totalMin = walkMin + walkMarginMin + trainWaitMin + trainMin;
+  return new Date(endTime.getTime() + totalMin * 60 * 1000);
+}
+
+// ==== calcYukiStationArrivalEstimateFromData_のラッパー(固定値のみで完結。Maps呼び出しなし) ====
+function calcYukiStationArrivalEstimate_(endTime) {
+  return calcYukiStationArrivalEstimateFromData_(endTime,
+    getYukiWalkFallbackMin_(), getYukiWalkMarginMin_(), getYukiTrainWaitMin_(), getYukiTrainMin_());
+}
+
+/**
+ * ゆうきさんの非登校日部活(TRANSITモード、項目A2)1件分の詳細を算出する(気象APIを実際に呼び出す)。
  * 実際のデータ取得を行い、純粋関数calcYukiTransitDepartureFromData_に渡すだけの薄いラッパー
  * (calcDepartureNoticeDetails_のTRANSIT版。CAR/BIKEと違いConfig.gs側では扱わず、
  * ゆうきさん専用のためこのファイルに置く)。
+ * 今回の改訂: 採用する値は固定値(スクリプトプロパティ)を優先する方針に変更した。Mapsは
+ * 比較用の参考値としてのみ呼び出し、結果をログに出すが、計算には使わない
+ * (logYukiTravelTimeMapsComparison_参照。理由: Mapsの結果は取得タイミングやリアルタイム交通状況で
+ * 変動しうる一方、通知の再現性・予測可能性を優先し、実地検索で確認した固定値を使う方針とした)。
  * @param {Object} target getDepartureNoticeTargets_の要素({label, startTime, endTime, mode:'TRANSIT'})
- * @return {Object} label, mode, startTime, endTime, departureTime, carMin, trainMin, walkMin, stationBufferMin, pop
+ * @return {Object} label, mode, startTime, endTime, departureTime, carMin, carMarginMin, trainMin,
+ *   stationBufferMin, walkMin, walkMarginMin, pop
  */
 function calcYukiTransitDetails_(target) {
-  const carMin = getDrivingTravelMinutes_(WEATHER_LOCATIONS_.HOME.address, WEATHER_LOCATIONS_.STATION_WAKABAYASHI.address,
-    getYukiCarToStationFallbackMin_());
-  const trainMin = getTransitTravelMinutes_(WEATHER_LOCATIONS_.STATION_WAKABAYASHI.address, WEATHER_LOCATIONS_.STATION_KARIYASHI.address,
-    getYukiTrainMin_());
-  const walkMin = getWalkingTravelMinutes_(WEATHER_LOCATIONS_.STATION_KARIYASHI.address, WEATHER_LOCATIONS_.SCHOOL_YUKI.address,
-    getYukiWalkFallbackMin_());
+  const carMin = getYukiCarToStationFallbackMin_();
+  const carMarginMin = getYukiCarMarginMin_();
+  const trainMin = getYukiTrainMin_();
   const stationBufferMin = getYukiStationBufferMin_();
-  const base = calcYukiTransitDepartureFromData_(target.startTime, carMin, trainMin, walkMin, stationBufferMin);
+  const walkMin = getYukiWalkFallbackMin_();
+  const walkMarginMin = getYukiWalkMarginMin_();
+
+  logYukiTravelTimeMapsComparison_(carMin, trainMin, walkMin);
+
+  const base = calcYukiTransitDepartureFromData_(target.startTime, carMin, carMarginMin, trainMin, stationBufferMin, walkMin, walkMarginMin);
 
   let pop = null;
   try {
@@ -127,12 +201,43 @@ function calcYukiTransitDetails_(target) {
     endTime: target.endTime,
     departureTime: base.departureTime,
     carMin: carMin,
+    carMarginMin: carMarginMin,
     trainMin: trainMin,
-    walkMin: walkMin,
     stationBufferMin: stationBufferMin,
+    walkMin: walkMin,
+    walkMarginMin: walkMarginMin,
     pop: pop,
     usedPop: pop !== null,
   };
+}
+
+/**
+ * Mapsの実測値を、採用している固定値と比較してログに出すだけの関数(項目A: 「採用する値は固定値を
+ * 優先する。Mapsの結果は併記ログに出す」)。戻り値は計算には使わない。Maps呼び出しに失敗しても
+ * 通知処理自体は止めない(try/catchで個別に握りつぶし、失敗した区間だけ「取得失敗」とログに出す)。
+ */
+function logYukiTravelTimeMapsComparison_(fixedCarMin, fixedTrainMin, fixedWalkMin) {
+  try {
+    const mapsCarMin = getDrivingTravelMinutes_(WEATHER_LOCATIONS_.HOME.address, WEATHER_LOCATIONS_.STATION_WAKABAYASHI.address, null);
+    Logger.log('[TRANSIT・Maps比較] 車(自宅→若林駅): Maps=' + (mapsCarMin === null ? '取得失敗' : mapsCarMin + '分') +
+      ' / 採用(固定値YUKI_CAR_TO_STATION_FALLBACK_MIN)=' + fixedCarMin + '分');
+  } catch (e) {
+    Logger.log('[TRANSIT・Maps比較] 車(自宅→若林駅)の取得中にエラー: ' + e.message);
+  }
+  try {
+    const mapsTrainMin = getTransitTravelMinutes_(WEATHER_LOCATIONS_.STATION_WAKABAYASHI.address, WEATHER_LOCATIONS_.STATION_KARIYASHI.address, null);
+    Logger.log('[TRANSIT・Maps比較] 電車(若林駅→刈谷市駅): Maps=' + (mapsTrainMin === null ? '取得失敗' : mapsTrainMin + '分') +
+      ' / 採用(固定値YUKI_TRAIN_MIN)=' + fixedTrainMin + '分');
+  } catch (e) {
+    Logger.log('[TRANSIT・Maps比較] 電車(若林駅→刈谷市駅)の取得中にエラー: ' + e.message);
+  }
+  try {
+    const mapsWalkMin = getWalkingTravelMinutes_(WEATHER_LOCATIONS_.STATION_KARIYASHI.address, WEATHER_LOCATIONS_.SCHOOL_YUKI.address, null);
+    Logger.log('[TRANSIT・Maps比較] 徒歩(刈谷市駅→刈谷高校): Maps=' + (mapsWalkMin === null ? '取得失敗' : mapsWalkMin + '分') +
+      ' / 採用(固定値YUKI_WALK_FALLBACK_MIN)=' + fixedWalkMin + '分');
+  } catch (e) {
+    Logger.log('[TRANSIT・Maps比較] 徒歩(刈谷市駅→刈谷高校)の取得中にエラー: ' + e.message);
+  }
 }
 
 /**

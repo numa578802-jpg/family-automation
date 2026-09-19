@@ -380,8 +380,8 @@ function buildDepartureNoticeMessage_(targetDate, personLabel, result, isFinal, 
     // ゆうきさんの非登校日部活(項目A2)。自宅→(車)若林駅→(電車)刈谷市駅→(徒歩)学校の順に逆算する。
     // 車で送迎するのは若林駅までの区間のみのため、CARモードと同様「連絡リマインド」型の文面にする。
     const departureLabel = Utilities.formatDate(result.departureTime, 'Asia/Tokyo', 'H:mm');
-    lines.push(result.label + 'は' + startLabel + 'から刈谷です。');
-    lines.push('家を出る目安: ' + departureLabel + '頃(若林駅へ車)');
+    lines.push(startLabel + 'から刈谷で' + result.label + '。');
+    lines.push(departureLabel + 'ごろ家を出る目安で若林駅へ(車)。');
     lines.push('車送迎の担当の方に連絡リマインドしてください。');
     if (result.pop !== null) {
       lines.push('降水確率: ' + result.pop + '%');
@@ -722,7 +722,9 @@ function buildPickupReminderMessage_(personLabel, label, mode, endTime) {
   const lines = [];
   lines.push('【' + personLabel + '】' + label + ' 迎えの連絡リマインド');
   if (mode === 'TRANSIT') {
-    lines.push(label + 'は' + endLabel + 'ごろ終了予定です。若林駅に着く時刻が分かったら、迎えの担当の方に連絡リマインドを。');
+    // 項目B: 若林駅に着く目安(固定値のみで算出。calcYukiStationArrivalEstimate_、WeatherNotify_YukiLogic.gs)を本文に入れる
+    const stationArrivalLabel = Utilities.formatDate(calcYukiStationArrivalEstimate_(endTime), 'Asia/Tokyo', 'H:mm');
+    lines.push(label + 'は' + endLabel + 'ごろ終了予定です。若林駅に着く目安: ' + stationArrivalLabel + '頃。迎えの担当の方に連絡リマインドを。');
   } else {
     lines.push(label + 'は' + endLabel + 'ごろ終了予定です。迎えの担当の方に連絡リマインドしてください。');
   }

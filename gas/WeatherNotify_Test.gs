@@ -20,6 +20,10 @@
  *     出発まわりの通知(項目A)の対象抽出・メッセージ文面を、実カレンダーで確認する診断用。
  * ・reportMessageVolumeEstimate()
  *     直近N日分の通知件数を、種類×宛先チャネル×暫定/確定で集計する(項目H)。実カレンダー必須。
+ * ・testYukiTravelTimes()
+ *     ゆうきさんのTRANSITモード(非登校日部活)で使う移動時間の実機検証用(新規)。直近の土曜・日曜、
+ *     朝8:00/9:00到着想定でMapsを実際に呼び出し、directions.status・所要時間・採用している固定値との
+ *     差をログに出す。LINE送信は行わない。
  * ------------------------------------------------------------
  */
 
@@ -451,4 +455,55 @@ function exportRecentScheduleForVolumeEstimate(startOffsetDays, days) {
   Logger.log('=== 予定の書き出し(' + Utilities.formatDate(dayStart, 'Asia/Tokyo', 'yyyy-MM-dd') +
     ' から ' + dayCount + '日分、' + result.length + '件。※家族の予定を含むためログの取り扱いに注意) ===');
   Logger.log(JSON.stringify(result));
+}
+
+/**
+ * ゆうきさんのTRANSITモード(非登校日部活)で使う移動時間の実機検証用(項目E、新規)。
+ * 直近の土曜・日曜、朝8:00・9:00到着想定(計4パターン)について、車(自宅→若林駅、DRIVING)・
+ * 徒歩(刈谷市駅→刈谷高校、WALKING)・電車(若林駅→刈谷市駅、TRANSIT)を実際にMapsで呼び出し、
+ * directions.status・所要時間・採用している固定値(YUKI_CAR_TO_STATION_FALLBACK_MIN等)との
+ * 差をログに出す。LINE送信は行わない。土日でダイヤが異なる可能性があるため両方確認する
+ * (電車は15分間隔とのユーザー申告があり、平日ダイヤと異なる可能性がある)。
+ */
+function testYukiTravelTimes() {
+  function nextDow_(dow) { // dow: 0=日曜〜6=土曜。今日と同じ曜日なら来週分を返す
+    const now = new Date();
+    let diff = (dow - now.getDay() + 7) % 7;
+    if (diff === 0) diff = 7;
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate() + diff);
+  }
+
+  const scenarios = [
+    { label: '直近の土曜 8:00到着想定', date: nextDow_(6), hour: 8 },
+    { label: '直近の土曜 9:00到着想定', date: nextDow_(6), hour: 9 },
+    { label: '直近の日曜 8:00到着想定', date: nextDow_(0), hour: 8 },
+    { label: '直近の日曜 9:00到着想定', date: nextDow_(0), hour: 9 },
+  ];
+
+  const fixedCarMin = getYukiCarToStationFallbackMin_();
+  const fixedWalkMin = getYukiWalkFallbackMin_();
+  const fixedTrainMin = getYukiTrainMin_();
+
+  function logLeg(label, originAddress, destinationAddress, mode, fixedMin, atTime, note) {
+    try {
+      const result = fetchDirectionsMinutes_(originAddress, destinationAddress, mode, atTime);
+      const diff = result.minutes === null ? '(差: 算出不可)' : '(差: Maps−固定値 = ' + (result.minutes - fixedMin) + '分)';
+      Logger.log(label + ': status=' + result.status + ' Maps所要時間=' +
+        (result.minutes === null ? '取得不可' : result.minutes + '分') + ' / 採用値(固定)=' + fixedMin + '分 ' + diff +
+        (note ? ' ' + note : ''));
+    } catch (e) {
+      Logger.log(label + ': 取得中にエラー: ' + e.message);
+    }
+  }
+
+  scenarios.forEach(function (s) {
+    const atTime = new Date(s.date.getFullYear(), s.date.getMonth(), s.date.getDate(), s.hour, 0, 0);
+    Logger.log('=== ' + s.label + '(' + Utilities.formatDate(atTime, 'Asia/Tokyo', 'yyyy-MM-dd H:mm') + ') ===');
+    logLeg('車(自宅→若林駅、DRIVING)', WEATHER_LOCATIONS_.HOME.address, WEATHER_LOCATIONS_.STATION_WAKABAYASHI.address,
+      Maps.DirectionFinder.Mode.DRIVING, fixedCarMin, atTime);
+    logLeg('徒歩(刈谷市駅→刈谷高校、WALKING)', WEATHER_LOCATIONS_.STATION_KARIYASHI.address, WEATHER_LOCATIONS_.SCHOOL_YUKI.address,
+      Maps.DirectionFinder.Mode.WALKING, fixedWalkMin, atTime);
+    logLeg('電車(若林駅→刈谷市駅、TRANSIT)', WEATHER_LOCATIONS_.STATION_WAKABAYASHI.address, WEATHER_LOCATIONS_.STATION_KARIYASHI.address,
+      Maps.DirectionFinder.Mode.TRANSIT, fixedTrainMin, atTime, '(土日ダイヤは要確認。列車は15分間隔とのユーザー申告あり)');
+  });
 }

@@ -167,21 +167,34 @@ function getBikingTravelMinutes_(originAddress, destinationAddress) {
 }
 
 /**
- * 車移動時間(分)を取得(項目A2: ゆうきさんの非登校日部活、自宅→若林駅の区間で使用)。
- * 取得できない場合はfallbackMinutesを返す。
+ * Maps.newDirectionFinder()を呼び出し、生のdirections結果と所要時間(分)を返す共通ヘルパー。
+ * atTimeを渡すとDirectionFinder#setDepart(atTime)でその時刻発を指定する(TRANSITモードで
+ * 実際の時刻表に基づく結果を得るために使う。項目E)。省略時は指定なし(=呼び出し時点が基準になる)。
+ * @return {{status:string, minutes:number|null}}
  */
-function getDrivingTravelMinutes_(originAddress, destinationAddress, fallbackMinutes) {
+function fetchDirectionsMinutes_(originAddress, destinationAddress, mode, atTime) {
+  const finder = Maps.newDirectionFinder()
+    .setOrigin(originAddress)
+    .setDestination(destinationAddress)
+    .setMode(mode);
+  if (atTime) finder.setDepart(atTime);
+  const directions = finder.getDirections();
+  const ok = directions && directions.status === 'OK' && directions.routes && directions.routes.length > 0;
+  return {
+    status: directions && directions.status,
+    minutes: ok ? Math.ceil(directions.routes[0].legs[0].duration.value / 60) : null,
+  };
+}
+
+/**
+ * 車移動時間(分)を取得(項目A2: ゆうきさんの非登校日部活、自宅→若林駅の区間で使用)。
+ * 取得できない場合はfallbackMinutesを返す(nullを渡すと、失敗時はnullを返す=比較ログ専用に使える)。
+ */
+function getDrivingTravelMinutes_(originAddress, destinationAddress, fallbackMinutes, atTime) {
   try {
-    const directions = Maps.newDirectionFinder()
-      .setOrigin(originAddress)
-      .setDestination(destinationAddress)
-      .setMode(Maps.DirectionFinder.Mode.DRIVING)
-      .getDirections();
-    if (directions.status === 'OK' && directions.routes && directions.routes.length > 0) {
-      const durationSec = directions.routes[0].legs[0].duration.value;
-      return Math.ceil(durationSec / 60);
-    }
-    Logger.log('車移動時間の取得に失敗(status: ' + (directions && directions.status) + ')。フォールバック値(' + fallbackMinutes + '分)を使用します。');
+    const result = fetchDirectionsMinutes_(originAddress, destinationAddress, Maps.DirectionFinder.Mode.DRIVING, atTime);
+    if (result.minutes !== null) return result.minutes;
+    Logger.log('車移動時間の取得に失敗(status: ' + result.status + ')。フォールバック値(' + fallbackMinutes + '分)を使用します。');
   } catch (e) {
     Logger.log('車移動時間の取得中にエラー: ' + e.message + ' フォールバック値(' + fallbackMinutes + '分)を使用します。');
   }
@@ -190,20 +203,13 @@ function getDrivingTravelMinutes_(originAddress, destinationAddress, fallbackMin
 
 /**
  * 徒歩移動時間(分)を取得(項目A2: ゆうきさんの非登校日部活、刈谷市駅→刈谷高校の区間で使用)。
- * 取得できない場合はfallbackMinutesを返す。
+ * 取得できない場合はfallbackMinutesを返す(nullを渡すと、失敗時はnullを返す=比較ログ専用に使える)。
  */
-function getWalkingTravelMinutes_(originAddress, destinationAddress, fallbackMinutes) {
+function getWalkingTravelMinutes_(originAddress, destinationAddress, fallbackMinutes, atTime) {
   try {
-    const directions = Maps.newDirectionFinder()
-      .setOrigin(originAddress)
-      .setDestination(destinationAddress)
-      .setMode(Maps.DirectionFinder.Mode.WALKING)
-      .getDirections();
-    if (directions.status === 'OK' && directions.routes && directions.routes.length > 0) {
-      const durationSec = directions.routes[0].legs[0].duration.value;
-      return Math.ceil(durationSec / 60);
-    }
-    Logger.log('徒歩移動時間の取得に失敗(status: ' + (directions && directions.status) + ')。フォールバック値(' + fallbackMinutes + '分)を使用します。');
+    const result = fetchDirectionsMinutes_(originAddress, destinationAddress, Maps.DirectionFinder.Mode.WALKING, atTime);
+    if (result.minutes !== null) return result.minutes;
+    Logger.log('徒歩移動時間の取得に失敗(status: ' + result.status + ')。フォールバック値(' + fallbackMinutes + '分)を使用します。');
   } catch (e) {
     Logger.log('徒歩移動時間の取得中にエラー: ' + e.message + ' フォールバック値(' + fallbackMinutes + '分)を使用します。');
   }
@@ -214,22 +220,18 @@ function getWalkingTravelMinutes_(originAddress, destinationAddress, fallbackMin
  * 電車移動時間(分)を取得(項目A2: ゆうきさんの非登校日部活、若林駅→刈谷市駅の区間で使用)。
  * MapsのTRANSITモードでの取得可否は、このプロジェクトの開発サンドボックスでは実行できず未検証
  * (Maps.newDirectionFinder自体がGAS実行時のみ利用可能なサービスのため)。取得できない場合、
- * またはエラー時はfallbackMinutes(通常はYUKI_TRAIN_MINスクリプトプロパティの値)を返す。
- * 実際にGAS上で実行し、directions.statusをログで確認して検証すること。
+ * またはエラー時はfallbackMinutes(通常はYUKI_TRAIN_MINスクリプトプロパティの値)を返す
+ * (nullを渡すと、失敗時はnullを返す=比較ログ専用に使える)。
+ * 実際にGAS上で実行し、directions.statusをログで確認して検証すること(testYukiTravelTimes参照)。
  */
-function getTransitTravelMinutes_(originAddress, destinationAddress, fallbackMinutes) {
+function getTransitTravelMinutes_(originAddress, destinationAddress, fallbackMinutes, atTime) {
   try {
-    const directions = Maps.newDirectionFinder()
-      .setOrigin(originAddress)
-      .setDestination(destinationAddress)
-      .setMode(Maps.DirectionFinder.Mode.TRANSIT)
-      .getDirections();
-    if (directions.status === 'OK' && directions.routes && directions.routes.length > 0) {
-      const durationSec = directions.routes[0].legs[0].duration.value;
-      Logger.log('電車移動時間(TRANSIT)の取得に成功しました: ' + Math.ceil(durationSec / 60) + '分。');
-      return Math.ceil(durationSec / 60);
+    const result = fetchDirectionsMinutes_(originAddress, destinationAddress, Maps.DirectionFinder.Mode.TRANSIT, atTime);
+    if (result.minutes !== null) {
+      Logger.log('電車移動時間(TRANSIT)の取得に成功しました: ' + result.minutes + '分(status: ' + result.status + ')。');
+      return result.minutes;
     }
-    Logger.log('電車移動時間(TRANSIT)の取得に失敗(status: ' + (directions && directions.status) + ')。固定値(YUKI_TRAIN_MIN=' + fallbackMinutes + '分)を使用します。');
+    Logger.log('電車移動時間(TRANSIT)の取得に失敗(status: ' + result.status + ')。固定値(YUKI_TRAIN_MIN=' + fallbackMinutes + '分)を使用します。');
   } catch (e) {
     Logger.log('電車移動時間(TRANSIT)の取得中にエラー: ' + e.message + ' 固定値(YUKI_TRAIN_MIN=' + fallbackMinutes + '分)を使用します。');
   }
