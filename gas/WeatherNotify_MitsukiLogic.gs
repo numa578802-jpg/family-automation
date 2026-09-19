@@ -124,13 +124,13 @@ function decideMitsukiSchoolCommute_(targetDate, calendarId) {
 function decideMitsukiDepartureNotices_(targetDate, calendarId) {
   const isSchool = isMitsukiSchoolDay_(targetDate, calendarId);
   const targets = getDepartureNoticeTargets_(targetDate, calendarId, '【みつき】', isSchool,
-    MITSUKI_LESSON_NAMES_, WEATHER_LOCATIONS_.SCHOOL_MITSUKI.address);
+    MITSUKI_LESSON_NAMES_, WEATHER_LOCATIONS_.SCHOOL_MITSUKI.address, 'MITSUKI');
   if (targets.length === 0) return [];
 
   const config = getWeatherConfig_();
   // 英語・お茶自体は「学校から家に向かう予定」ではない(いったん帰宅してから家庭発で出発する)ため、
   // 帰り予定時刻の算出対象からは除外する(MITSUKI_LESSON_NAMES_)。
-  const homeward = getHomewardDepartureTime_(targetDate, calendarId, '【みつき】', getMitsukiDefaultSchoolEnd_(), MITSUKI_LESSON_NAMES_);
+  const homeward = getHomewardDepartureTime_(targetDate, calendarId, '【みつき】', getMitsukiDefaultSchoolEnd_(), MITSUKI_LESSON_NAMES_, 'MITSUKI');
   return targets.map(function (target) {
     return calcDepartureNoticeDetails_(target, WEATHER_LOCATIONS_.HOME.address, homeward, config);
   });

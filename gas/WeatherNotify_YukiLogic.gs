@@ -65,7 +65,7 @@ function decideYukiTransport_(targetDate, useNowcast, calendarId) {
   const morning = evaluateRainCondition_(morningPop, morningRainSpots, config);
 
   // 帰り(下校)。時間的に離れているためナウキャストは使わず、降水確率のみで判定する。
-  const homeward = getHomewardDepartureTime_(targetDate, calendarId, '【ゆうき】', getYukiDefaultSchoolEnd_());
+  const homeward = getHomewardDepartureTime_(targetDate, calendarId, '【ゆうき】', getYukiDefaultSchoolEnd_(), YUKI_LESSON_NAMES_, 'YUKI');
   let afternoon = { rainy: false, reasons: [], pop: null, usedPop: false, usedNowcast: false };
   let homewardTime = null;
   let homewardLabel = null;
@@ -120,11 +120,11 @@ function decideYukiTransportFromData_(pop, rainSpotDetails, config) {
 function decideYukiDepartureNotices_(targetDate, calendarId) {
   const isSchool = isYukiSchoolDay_(targetDate, calendarId);
   const targets = getDepartureNoticeTargets_(targetDate, calendarId, '【ゆうき】', isSchool,
-    YUKI_LESSON_NAMES_, WEATHER_LOCATIONS_.SCHOOL_YUKI.address);
+    YUKI_LESSON_NAMES_, WEATHER_LOCATIONS_.SCHOOL_YUKI.address, 'YUKI');
   if (targets.length === 0) return [];
 
   const config = getWeatherConfig_();
-  const homeward = getHomewardDepartureTime_(targetDate, calendarId, '【ゆうき】', getYukiDefaultSchoolEnd_(), YUKI_LESSON_NAMES_);
+  const homeward = getHomewardDepartureTime_(targetDate, calendarId, '【ゆうき】', getYukiDefaultSchoolEnd_(), YUKI_LESSON_NAMES_, 'YUKI');
   return targets.map(function (target) {
     return calcDepartureNoticeDetails_(target, WEATHER_LOCATIONS_.HOME.address, homeward, config);
   });

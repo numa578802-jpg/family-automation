@@ -15,7 +15,10 @@
  *      「家から向かう習い事」のみが対象。天気・移動手段・出発時刻・車送迎要否をまとめて1通で案内する。
  *      暫定版は必ず送るが、確定版は暫定版から判断が変わった場合のみ送る。
  *   4. 帰りの雨雲通過予報(ゆうき・みつき共通) … 帰り予定時刻の少し前に発火する使い捨てトリガー
- *   5. 車送迎の直前アラート(出発まわりの通知でCARモードの予定のみ) … 出発の少し前に発火する使い捨てトリガー
+ *   5. 車送迎の直前アラート(出発まわりの通知でCARモードの予定) … 出発の何分前か(CAR_PICKUP_ALERT_LEAD_MIN)に
+ *      発火する使い捨てトリガー。本人+一志さん・きくみさん(CC)宛。
+ *   6. 自転車の出発直前アラート(出発まわりの通知でBIKEモードの予定) … 出発目安の何分前か
+ *      (BIKE_DEPARTURE_ALERT_LEAD_MIN)に発火する使い捨てトリガー。本人のみ宛(CCなし)。
  * ------------------------------------------------------------
  */
 
@@ -130,7 +133,7 @@ function runWeatherNotification_(targetDate, isFinal) {
     }
   });
 
-  // 確定版配信時のみ、帰りの少し前に「帰りの雨雲通過予報」・車送迎の直前アラートを予約する
+  // 確定版配信時のみ、帰りの少し前に「帰りの雨雲通過予報」・車送迎/自転車の直前アラートを予約する
   if (isFinal) {
     try {
       scheduleHomewardRainAlerts_(targetDate, calendarId);
@@ -141,6 +144,11 @@ function runWeatherNotification_(targetDate, isFinal) {
       scheduleCarPickupAlerts_(targetDate, calendarId, departureNoticesByPerson);
     } catch (e) {
       Logger.log('車送迎の直前アラートの予約処理でエラー: ' + e.message);
+    }
+    try {
+      scheduleBikeDepartureAlerts_(targetDate, calendarId, departureNoticesByPerson);
+    } catch (e) {
+      Logger.log('自転車の出発直前アラートの予約処理でエラー: ' + e.message);
     }
   }
 }
@@ -339,8 +347,11 @@ function buildDepartureNoticeMessage_(targetDate, personLabel, result, isFinal, 
   if (result.mode === 'CAR') {
     // 車送迎固定(項目A-2)。自転車換算・降水判定・カッパ準備・送迎要否判断は行わない。
     // 送迎の手配は本人の責任という方針のため、文面は本人に連絡を促す形にする。
+    // 行きの出発目安=予定開始時刻から車移動時間の仮値(CAR_TRAVEL_MINUTES_DEFAULT)を引いた時刻、
+    // 帰りのお迎え目安=この予定自身の終了時刻(項目1で修正。以前はその日全体の帰り予定を誤って
+    // 流用しており、開始前の時刻が出るバグがあった)。
     lines.push(result.label + 'は' + startLabel + 'からです。車送迎の担当の方に連絡リマインドしてください。');
-    lines.push('行きの出発目安: ' + startLabel + '頃');
+    lines.push('行きの出発目安: ' + Utilities.formatDate(result.departureTime, 'Asia/Tokyo', 'H:mm') + '頃');
     if (result.pickupTime) {
       lines.push('帰りのお迎え目安: ' + Utilities.formatDate(result.pickupTime, 'Asia/Tokyo', 'H:mm') + '頃');
     } else {
@@ -407,7 +418,7 @@ function scheduleHomewardRainAlerts_(targetDate, calendarId) {
 }
 
 function scheduleHomewardRainAlertFor_(personKey, personLabel, targetDate, calendarId, namePrefix, defaultEndTime, routeKeys, leadMin, excludeLabelKeywords) {
-  const homeward = getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultEndTime, excludeLabelKeywords);
+  const homeward = getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultEndTime, excludeLabelKeywords, personKey);
   if (!homeward) {
     Logger.log(personLabel + ': 帰りの予定が無いため、帰りの雨雲アラートは予約しませんでした。');
     return;
@@ -580,6 +591,96 @@ function buildCarPickupAlertMessage_(personLabel, label, startTime, pickupTime) 
   lines.push('まもなく' + startLabel + 'から' + label + 'です。車送迎の担当の方に連絡リマインドしてください。');
   if (pickupTime) {
     lines.push('帰りのお迎え目安: ' + Utilities.formatDate(pickupTime, 'Asia/Tokyo', 'H:mm') + '頃');
+  }
+  return lines.join('\n');
+}
+
+/**
+ * 自転車の出発直前アラート(項目9)
+ * ------------------------------------------------------------
+ * 出発まわりの通知(項目A)でBIKEモードと判定された予定(お茶・部活等)について、
+ * 出発目安のBIKE_DEPARTURE_ALERT_LEAD_MIN分前(デフォルト30分・Config.gs、仮値)に発火する
+ * 使い捨てトリガーを予約する。車送迎の直前アラートと異なり、宛先は本人のみ(親へのCCは付けない)。
+ * 内容は自転車での出発を促す簡潔なリマインドで、雨天時はカッパの携行を案内する。
+ * ------------------------------------------------------------
+ */
+const BIKE_DEPARTURE_ALERT_PENDING_PREFIX_ = 'PENDING_BIKE_DEPARTURE_ALERT_';
+
+// ==== 確定版配信時に、出発まわりの通知でBIKEモードだった予定それぞれの出発直前アラートを予約する ====
+function scheduleBikeDepartureAlerts_(targetDate, calendarId, departureNoticesByPerson) {
+  const leadMin = getBikeDepartureAlertLeadMin_();
+
+  ['YUKI', 'MITSUKI'].forEach(function (personKey) {
+    const personLabel = personKey === 'YUKI' ? 'ゆうき' : 'みつき';
+    const bikeTargets = (departureNoticesByPerson[personKey] || []).filter(function (r) { return r.mode === 'BIKE'; });
+    if (bikeTargets.length === 0) return;
+
+    bikeTargets.forEach(function (target, index) {
+      const alertTime = new Date(target.departureTime.getTime() - leadMin * 60 * 1000);
+      if (alertTime.getTime() <= Date.now()) {
+        Logger.log(personLabel + ': ' + target.label + '(出発目安 ' + target.departureTime + ')が近すぎる/過去のため、自転車の出発直前アラートは予約しませんでした。');
+        return;
+      }
+
+      const props = PropertiesService.getScriptProperties();
+      const key = BIKE_DEPARTURE_ALERT_PENDING_PREFIX_ + personKey + '_' + Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyyMMdd') + '_' + index;
+      props.setProperty(key, JSON.stringify({
+        personKey: personKey,
+        personLabel: personLabel,
+        label: target.label,
+        departureTime: target.departureTime.toISOString(),
+        isRaining: target.isRaining,
+        scheduledAt: alertTime.toISOString(),
+      }));
+      ScriptApp.newTrigger('runScheduledBikeDepartureAlerts_').timeBased().at(alertTime).create();
+      Logger.log(personLabel + ': ' + target.label + 'の自転車出発直前アラートを' + alertTime + 'に予約しました(出発目安 ' + target.departureTime + ')。');
+    });
+  });
+}
+
+// ==== 予約された自転車の出発直前アラートを、実際の時刻が来たら送信する(使い捨てトリガーから呼ばれる) ====
+function runScheduledBikeDepartureAlerts_(e) {
+  // 自分自身を呼び出したトリガーは、多重実行を防ぐため実行後すぐ削除する
+  if (e && e.triggerUid) {
+    ScriptApp.getProjectTriggers().forEach(function (trigger) {
+      if (trigger.getUniqueId() === e.triggerUid) {
+        ScriptApp.deleteTrigger(trigger);
+      }
+    });
+  }
+
+  const props = PropertiesService.getScriptProperties();
+  const allProps = props.getProperties();
+  const now = Date.now();
+  const config = getWeatherConfig_();
+
+  Object.keys(allProps).forEach(function (key) {
+    if (key.indexOf(BIKE_DEPARTURE_ALERT_PENDING_PREFIX_) !== 0) return;
+    const data = JSON.parse(allProps[key]);
+    if (new Date(data.scheduledAt).getTime() > now + 60 * 1000) return;
+
+    props.deleteProperty(key); // 二重送信防止のため、処理対象として取り出した時点で先に削除
+
+    try {
+      const message = buildBikeDepartureAlertMessage_(data.personLabel, data.label, new Date(data.departureTime), data.isRaining);
+      // 親へのCCは付けない(項目9)。本人の宛先・チャネルは、その時点のconfigからpersonKeyで解決する
+      // (getPersonNotifyRecipients_の1件目=本人枠を使う。userId未登録時はsendLinePushMessage_内でスキップされる)。
+      const self = getPersonNotifyRecipients_(config, data.personKey)[0];
+      sendLinePushMessage_(self.userId, message, self.accessToken, self.channelLabel);
+    } catch (err) {
+      Logger.log('自転車の出発直前アラートの送信でエラー(' + data.label + '): ' + err.message);
+    }
+  });
+}
+
+// ==== 自転車の出発直前アラートのメッセージ文面(本人のみ宛) ====
+function buildBikeDepartureAlertMessage_(personLabel, label, departureTime, isRaining) {
+  const departureLabel = Utilities.formatDate(departureTime, 'Asia/Tokyo', 'H:mm');
+  const lines = [];
+  lines.push('【' + personLabel + '】' + label + ' 出発まわりの通知(直前)');
+  lines.push('まもなく' + departureLabel + 'に家を出る時間です(' + label + ')。自転車で出発してください。');
+  if (isRaining) {
+    lines.push('雨天のためカッパを持って行ってください。');
   }
   return lines.join('\n');
 }

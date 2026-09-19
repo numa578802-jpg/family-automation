@@ -32,6 +32,10 @@
  *   MITSUKI_DEFAULT_SCHOOL_END         … みつきさんの通常下校時刻(部活が無い日の下校時刻。デフォルト16:00)
  *   HOMEWARD_ALERT_LEAD_MIN            … 「帰りの雨雲通過予報」を帰り予定時刻の何分前に送るか(デフォルト30)
  *   CAR_PICKUP_ALERT_LEAD_MIN          … 車送迎の直前アラートを、予定開始の何分前に送るか(デフォルト60)
+ *   BIKE_DEPARTURE_ALERT_LEAD_MIN      … 自転車の出発直前アラート(本人のみ)を、出発目安の何分前に送るか(デフォルト30、仮値)
+ *   ARRIVAL_MARGIN_MIN                 … 出発目安の計算に加える「到着の余裕」(分、デフォルト0)
+ *   CAR_TRAVEL_MINUTES_DEFAULT         … 車送迎(CARモード)の出発目安を計算する際の移動時間の仮値(分、デフォルト10)
+ *   CAR_EVENT_DEFAULT_DURATION_MIN     … 車送迎の予定に終了時刻が無い場合の所要時間の仮値(分、デフォルト90)
  * ------------------------------------------------------------
  */
 
@@ -226,10 +230,14 @@ function evaluateRainCondition_(pop, rainSpotDetails, config) {
  * 対象日の「学校(または活動場所)から家に向かって出発する時刻」を、ゆうき・みつき共通で算出する。
  * ルール:
  *   1. 対象日に時刻付きの【namePrefix】予定(部活動等、学校発の予定)があれば、最も遅く終わる予定の
- *      終了時刻を採用する。ただし予定名がexcludeLabelKeywordsのいずれかを含む場合は候補から除外する
- *      (英語・お茶のような、いったん家に帰ってから改めて家庭から出発する予定は、
- *      「学校から家に向かう時刻」の計算には含めない。含めてしまうと、実際の下校時刻より大幅に遅い
- *      時刻が「下校予定」として算出されてしまい、下校時雨雲アラートの発火予約が大きくずれるバグになる)。
+ *      終了時刻を採用する。ただし次のいずれかに該当する予定は候補から除外する。
+ *      (a) 予定名がexcludeLabelKeywordsのいずれかを含む(英語・お茶のような、いったん家に帰ってから
+ *          改めて家庭から出発する予定。「学校から家に向かう時刻」の計算には含めない)。
+ *      (b) その予定の移動手段(getEventTransportMode_)が'CAR'(車送迎固定)である(例: ゆうきの非登校日の
+ *          部活は項目8により車送迎固定になったため、自転車ルートの雨雲予報である「帰りの雨雲アラート」の
+ *          基準には使わない。車で送迎される日は、その情報自体が意味を持たないため)。
+ *      これらを除外しないと、実際の帰り時刻より大幅に遅い(または無関係な)時刻が「帰り予定」として
+ *      算出されてしまい、帰りの雨雲アラートの発火予約が大きくずれるバグになる(過去に発生した実例)。
  *   2. 該当する予定が1件も無い場合のみ、対象日が登校日であればdefaultTimeStr(通常の下校時刻)を採用する。
  *      (予定があるのに既定時刻と比較して遅い方を採る、という処理は行わない。部活が既定時刻より早く
  *      終わる日は、その部活の終了時刻をそのまま採用する)
@@ -239,12 +247,14 @@ function evaluateRainCondition_(pop, rainSpotDetails, config) {
  * @param {string} namePrefix '【ゆうき】' または '【みつき】'
  * @param {string} defaultTimeStr 通常下校時刻(例: '17:00')
  * @param {string[]} [excludeLabelKeywords] この文字列のいずれかを予定名に含む場合、候補から除外する(部分一致)
+ * @param {string} [personKey] 'YUKI'または'MITSUKI'。CARモード判定(getEventTransportMode_)に使う
  * @return {{time: Date, source: 'calendar'|'default', label: string}|null}
  */
-function getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultTimeStr, excludeLabelKeywords) {
+function getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultTimeStr, excludeLabelKeywords, personKey) {
   const dateStr = Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyy-MM-dd');
   const dayStart = new Date(dateStr + 'T00:00:00');
   const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
+  const isSchool = isSchoolDay_(targetDate, calendarId, namePrefix);
 
   let latestEventEnd = null;
   let latestEventLabel = null;
@@ -255,6 +265,7 @@ function getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultTi
       if (ev.getTitle().indexOf(namePrefix) !== 0 || ev.isAllDayEvent()) return;
       const label = ev.getTitle().replace(namePrefix, '');
       if (excludeLabelKeywords && excludeLabelKeywords.some(function (kw) { return label.indexOf(kw) !== -1; })) return;
+      if (personKey && getEventTransportMode_(label, personKey, isSchool) === 'CAR') return;
       const end = ev.getEndTime();
       if (!latestEventEnd || end > latestEventEnd) {
         latestEventEnd = end;
@@ -269,7 +280,6 @@ function getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultTi
     return { time: latestEventEnd, source: 'calendar', label: latestEventLabel };
   }
 
-  const isSchool = isSchoolDay_(targetDate, calendarId, namePrefix);
   if (isSchool) {
     return { time: new Date(dateStr + 'T' + defaultTimeStr + ':00'), source: 'default', label: '通常下校' };
   }
@@ -278,23 +288,28 @@ function getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultTi
 
 /**
  * 予定名(キーワード部分一致)→移動手段の対応表(項目A-2)。
- * 一致しなければ既定の'BIKE'(自転車)。'CAR'は自転車換算・降水判定・カッパ準備・送迎要否判断を一切行わず、
- * 常に車での送迎を前提とした「連絡リマインド」型の文面になる(buildDepartureNoticeMessage_参照)。
- * 「英語(塾)」のように括弧書きが付く場合があるため部分一致で判定する。
+ * 一致しなければ既定は'BIKE'(自転車)。ただし、ゆうきさんの非登校日の予定は既定を'CAR'に切り替える
+ * (項目8: 実態として土日祝・長期休暇の部活はほぼ常に車送迎のため)。'CAR'は自転車換算・降水判定・
+ * カッパ準備・送迎要否判断を一切行わず、常に車での送迎を前提とした「連絡リマインド」型の文面になる
+ * (buildDepartureNoticeMessage_参照)。「英語(塾)」のように括弧書きが付く場合があるため部分一致で判定する。
+ * @param {string} label 予定名(【ゆうき】等のタグを除いた部分)
+ * @param {string} [personKey] 'YUKI'または'MITSUKI'
+ * @param {boolean} [isSchoolDayFlag] 対象日が登校日かどうか
  */
 const EVENT_TRANSPORT_MODE_KEYWORDS_ = {
   '英語': 'CAR',
 };
 
-function getEventTransportMode_(label) {
+function getEventTransportMode_(label, personKey, isSchoolDayFlag) {
   const keys = Object.keys(EVENT_TRANSPORT_MODE_KEYWORDS_);
   for (let i = 0; i < keys.length; i++) {
     if (label.indexOf(keys[i]) !== -1) return EVENT_TRANSPORT_MODE_KEYWORDS_[keys[i]];
   }
+  if (personKey === 'YUKI' && !isSchoolDayFlag) return 'CAR';
   return 'BIKE';
 }
 
-// ==== 車送迎の直前アラート(連絡リマインド)を、予定開始の何分前に送るか(項目A-2) ====
+// ==== 車送迎の直前アラート(連絡リマインド。本人+CC)を、予定開始の何分前に送るか(項目A-2) ====
 const CAR_PICKUP_ALERT_LEAD_MIN_PROP_ = 'CAR_PICKUP_ALERT_LEAD_MIN';
 const CAR_PICKUP_ALERT_LEAD_MIN_FALLBACK_ = 60;
 
@@ -302,6 +317,47 @@ function getCarPickupAlertLeadMin_() {
   const value = PropertiesService.getScriptProperties().getProperty(CAR_PICKUP_ALERT_LEAD_MIN_PROP_);
   const n = Number(value);
   return value && !isNaN(n) ? n : CAR_PICKUP_ALERT_LEAD_MIN_FALLBACK_;
+}
+
+// ==== 自転車の出発直前アラート(本人のみ、CCなし)を、出発目安の何分前に送るか(項目9・仮値) ====
+const BIKE_DEPARTURE_ALERT_LEAD_MIN_PROP_ = 'BIKE_DEPARTURE_ALERT_LEAD_MIN';
+const BIKE_DEPARTURE_ALERT_LEAD_MIN_FALLBACK_ = 30;
+
+function getBikeDepartureAlertLeadMin_() {
+  const value = PropertiesService.getScriptProperties().getProperty(BIKE_DEPARTURE_ALERT_LEAD_MIN_PROP_);
+  const n = Number(value);
+  return value && !isNaN(n) ? n : BIKE_DEPARTURE_ALERT_LEAD_MIN_FALLBACK_;
+}
+
+// ==== 到着の余裕(自転車の出発目安の計算に加える。項目2。初期値0=余裕を見ない) ====
+const ARRIVAL_MARGIN_MIN_PROP_ = 'ARRIVAL_MARGIN_MIN';
+const ARRIVAL_MARGIN_MIN_FALLBACK_ = 0;
+
+function getArrivalMarginMin_() {
+  const value = PropertiesService.getScriptProperties().getProperty(ARRIVAL_MARGIN_MIN_PROP_);
+  const n = Number(value);
+  return value && !isNaN(n) ? n : ARRIVAL_MARGIN_MIN_FALLBACK_;
+}
+
+// ==== 車送迎(CARモード)の出発目安・お迎え目安を計算する際の仮値(項目1) ====
+// 車の移動時間は自転車のようにMapsで計算せず、固定の仮値を使う(送迎の手配・所要時間は送迎担当者に委ねる方針のため)。
+const CAR_TRAVEL_MINUTES_DEFAULT_PROP_ = 'CAR_TRAVEL_MINUTES_DEFAULT';
+const CAR_TRAVEL_MINUTES_DEFAULT_FALLBACK_ = 10;
+
+function getCarTravelMinutesDefault_() {
+  const value = PropertiesService.getScriptProperties().getProperty(CAR_TRAVEL_MINUTES_DEFAULT_PROP_);
+  const n = Number(value);
+  return value && !isNaN(n) ? n : CAR_TRAVEL_MINUTES_DEFAULT_FALLBACK_;
+}
+
+// 予定に終了時刻が無い場合(通常のGoogleカレンダー予定では起こらないが念のため)の所要時間の仮値
+const CAR_EVENT_DEFAULT_DURATION_MIN_PROP_ = 'CAR_EVENT_DEFAULT_DURATION_MIN';
+const CAR_EVENT_DEFAULT_DURATION_MIN_FALLBACK_ = 90;
+
+function getCarEventDefaultDurationMin_() {
+  const value = PropertiesService.getScriptProperties().getProperty(CAR_EVENT_DEFAULT_DURATION_MIN_PROP_);
+  const n = Number(value);
+  return value && !isNaN(n) ? n : CAR_EVENT_DEFAULT_DURATION_MIN_FALLBACK_;
 }
 
 /**
@@ -317,9 +373,10 @@ function getCarPickupAlertLeadMin_() {
  * @param {boolean} isSchoolDayFlag 対象日が登校日かどうか(isSchoolDay_の結果をそのまま渡す)
  * @param {string[]} householdLessonKeywords 登校日に対象とする、家から向かう習い事名のキーワード一覧(部分一致)
  * @param {string} defaultDestinationAddress 予定にlocationが無い場合の目的地(通常は学校の住所)
- * @return {Array<{label:string, startTime:Date, destinationAddress:string, mode:'CAR'|'BIKE'}>}
+ * @param {string} personKey 'YUKI'または'MITSUKI'(移動手段の判定に使う。getEventTransportMode_参照)
+ * @return {Array<{label:string, startTime:Date, endTime:Date, destinationAddress:string, mode:'CAR'|'BIKE'}>}
  */
-function getDepartureNoticeTargets_(targetDate, calendarId, namePrefix, isSchoolDayFlag, householdLessonKeywords, defaultDestinationAddress) {
+function getDepartureNoticeTargets_(targetDate, calendarId, namePrefix, isSchoolDayFlag, householdLessonKeywords, defaultDestinationAddress, personKey) {
   const dateStr = Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyy-MM-dd');
   const dayStart = new Date(dateStr + 'T00:00:00');
   const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
@@ -348,8 +405,9 @@ function getDepartureNoticeTargets_(targetDate, calendarId, namePrefix, isSchool
     targets.push({
       label: label,
       startTime: ev.getStartTime(),
+      endTime: ev.getEndTime(),
       destinationAddress: ev.getLocation() || defaultDestinationAddress,
-      mode: getEventTransportMode_(label),
+      mode: getEventTransportMode_(label, personKey, isSchoolDayFlag),
     });
   });
   return targets;
@@ -359,16 +417,20 @@ function getDepartureNoticeTargets_(targetDate, calendarId, namePrefix, isSchool
  * 予定開始時刻・自転車移動時間・降水確率から出発時刻を算出する純粋関数(自転車移動共通部分)。
  * ネットワークアクセスを行わないため、テストハーネスからモックデータで検証できる。
  * みつきさんの登校(自転車通学、項目B)・出発まわりの通知(項目A・BIKEモード)の両方で使う。
+ * 式(項目2): 出発目安 = 開始時刻 − 自転車の移動時間 − 雨天バッファ − 到着の余裕(ARRIVAL_MARGIN_MIN)。
+ * 到着の余裕は初期値0分(みつきさんは開始ちょうどに着く実態のため)。
  */
 function calcBikeDeparture_(startTime, travelMinutes, pop, config) {
   const isRaining = pop !== null && pop >= config.popThreshold;
   const bufferMin = isRaining ? config.mitsukiRainBufferMin : 0;
-  const departureTime = new Date(startTime.getTime() - (travelMinutes + bufferMin) * 60 * 1000);
+  const marginMin = getArrivalMarginMin_();
+  const departureTime = new Date(startTime.getTime() - (travelMinutes + bufferMin + marginMin) * 60 * 1000);
   return {
     departureTime: departureTime,
     travelMinutes: travelMinutes,
     isRaining: isRaining,
     bufferMin: bufferMin,
+    marginMin: marginMin,
     pop: pop,
     usedPop: pop !== null,
   };
@@ -388,11 +450,20 @@ function calcBikeDeparture_(startTime, travelMinutes, pop, config) {
  */
 function calcDepartureNoticeDetailsFromData_(target, travelMinutes, pop, returnPop, homeward, config) {
   if (target.mode === 'CAR') {
+    // 行きの出発目安: 予定開始時刻から、車移動時間の仮値(CAR_TRAVEL_MINUTES_DEFAULT)を引いた時刻。
+    // 帰りのお迎え目安: この予定「自身」の終了時刻を基準にする(その日全体の帰り予定=homewardは、
+    // 英語・お茶等の家庭発の予定を除外して算出したものであり、この予定自体の終了時刻とは無関係のため、
+    // homewardを流用すると誤った時刻になる。終了時刻が無い予定は開始+所要時間の仮値で代用する)。
+    const carTravelMinutes = getCarTravelMinutesDefault_();
+    const departureTime = new Date(target.startTime.getTime() - carTravelMinutes * 60 * 1000);
+    const pickupTime = target.endTime || new Date(target.startTime.getTime() + getCarEventDefaultDurationMin_() * 60 * 1000);
     return {
       label: target.label,
       mode: 'CAR',
       startTime: target.startTime,
-      pickupTime: homeward ? homeward.time : null,
+      departureTime: departureTime,
+      travelMinutes: carTravelMinutes,
+      pickupTime: pickupTime,
     };
   }
 

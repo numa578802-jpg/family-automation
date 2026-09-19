@@ -122,7 +122,12 @@ function testDepartureNoticeEscortCases() {
   Logger.log('--- メッセージサンプル(BIKEモード・車送迎検討) ---\n' +
     buildDepartureNoticeMessage_(new Date('2026-08-13T00:00:00+09:00'), 'みつき', bikeResult, true, null));
 
-  const carTarget = { label: '英語(塾)', startTime: new Date('2026-08-13T18:10:00+09:00'), mode: 'CAR' };
+  const carTarget = {
+    label: '英語(塾)',
+    startTime: new Date('2026-08-13T18:10:00+09:00'),
+    endTime: new Date('2026-08-13T19:30:00+09:00'),
+    mode: 'CAR',
+  };
   const carResult = calcDepartureNoticeDetailsFromData_(carTarget, null, null, null, homeward, config);
   Logger.log('--- メッセージサンプル(CARモード・英語) ---\n' +
     buildDepartureNoticeMessage_(new Date('2026-08-13T00:00:00+09:00'), 'みつき', carResult, true, null));
@@ -236,10 +241,12 @@ function testHomewardDepartureSmoke() {
 
   ['ゆうき', 'みつき'].forEach(function (name) {
     const namePrefix = '【' + name + '】';
+    const personKey = name === 'ゆうき' ? 'YUKI' : 'MITSUKI';
     const defaultEnd = name === 'ゆうき' ? getYukiDefaultSchoolEnd_() : getMitsukiDefaultSchoolEnd_();
-    // 英語・お茶(家庭発の予定)は帰り予定時刻の算出対象から除外する(本番と同じ条件)
+    // 英語・お茶(家庭発の予定)、およびCARモードの予定(項目8: ゆうきの非登校日の部活等)は
+    // 帰り予定時刻の算出対象から除外する(本番と同じ条件)
     const excludeLabelKeywords = name === 'ゆうき' ? YUKI_LESSON_NAMES_ : MITSUKI_LESSON_NAMES_;
-    const result = getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultEnd, excludeLabelKeywords);
+    const result = getHomewardDepartureTime_(targetDate, calendarId, namePrefix, defaultEnd, excludeLabelKeywords, personKey);
     if (!result) {
       Logger.log(name + ': 対象日は帰りの予定なし(登校日でもなく、時刻付きの予定も無い)');
     } else {
@@ -371,17 +378,24 @@ function reportMessageVolumeEstimate(startOffsetDays, days) {
         if (version === '確定' && r.mode === 'CAR') {
           addForRecipients(getPersonNotifyRecipients_(config, 'MITSUKI'), '車送迎の直前アラート(みつき)', version);
         }
+        if (version === '確定' && r.mode === 'BIKE') {
+          // 自転車の出発直前アラートは本人のみ(CCなし)
+          addCount(getPersonNotifyRecipients_(config, 'MITSUKI')[0].channelLabel, '自転車の出発直前アラート(みつき)', version);
+        }
       });
       yukiDep.forEach(function (r) {
         if (version === '確定' && r.mode === 'CAR') {
           addForRecipients(getPersonNotifyRecipients_(config, 'YUKI'), '車送迎の直前アラート(ゆうき)', version);
         }
+        if (version === '確定' && r.mode === 'BIKE') {
+          addCount(getPersonNotifyRecipients_(config, 'YUKI')[0].channelLabel, '自転車の出発直前アラート(ゆうき)', version);
+        }
       });
       // 帰りの雨雲アラート(確定版配信時のみ予約される)
       if (version === '確定') {
-        const yukiHomeward = getHomewardDepartureTime_(targetDate, calendarId, '【ゆうき】', getYukiDefaultSchoolEnd_(), YUKI_LESSON_NAMES_);
+        const yukiHomeward = getHomewardDepartureTime_(targetDate, calendarId, '【ゆうき】', getYukiDefaultSchoolEnd_(), YUKI_LESSON_NAMES_, 'YUKI');
         if (yukiHomeward) addForRecipients(getPersonNotifyRecipients_(config, 'YUKI'), '帰りの雨雲アラート(ゆうき)', version);
-        const mitsukiHomeward = getHomewardDepartureTime_(targetDate, calendarId, '【みつき】', getMitsukiDefaultSchoolEnd_(), MITSUKI_LESSON_NAMES_);
+        const mitsukiHomeward = getHomewardDepartureTime_(targetDate, calendarId, '【みつき】', getMitsukiDefaultSchoolEnd_(), MITSUKI_LESSON_NAMES_, 'MITSUKI');
         if (mitsukiHomeward) addForRecipients(getPersonNotifyRecipients_(config, 'MITSUKI'), '帰りの雨雲アラート(みつき)', version);
       }
     });
@@ -401,4 +415,39 @@ function reportMessageVolumeEstimate(startOffsetDays, days) {
     Logger.log('  合計: ' + total + '件(' + dayCount + '日間) / 30日換算: 約' + monthlyRate + '件(無料枠200件に対し約' +
       Math.round(monthlyRate / 200 * 100) + '%)');
   });
+}
+
+/**
+ * 通数集計の代替(項目7)。直近N日分の【ゆうき】【みつき】タグ付き予定を、タイトル・開始/終了時刻・
+ * 終日かどうかだけに絞ってJSONでログに出す。実行結果をコピーしてこちらに貼ってもらえれば、
+ * Node上で旧ロジック・新ロジックの両方に同じデータを通して通知件数を集計できる
+ * (この関数自体は予定の内容をそのままログに出すため、実行結果はリポジトリにコミットしないこと)。
+ * @param {number} [startOffsetDays] 収集開始日(今日からのオフセット日数。既定0=今日から)
+ * @param {number} [days] 収集日数(既定30)
+ */
+function exportRecentScheduleForVolumeEstimate(startOffsetDays, days) {
+  const offset = (startOffsetDays === undefined) ? 0 : startOffsetDays;
+  const dayCount = days || 30;
+  const calendarId = getConfig_().calendarId;
+  const dayStart = new Date(new Date().setHours(0, 0, 0, 0) + offset * 24 * 60 * 60 * 1000);
+  const dayEnd = new Date(dayStart.getTime() + dayCount * 24 * 60 * 60 * 1000);
+
+  const calendar = CalendarApp.getCalendarById(calendarId);
+  const events = calendar.getEvents(dayStart, dayEnd);
+  const result = events
+    .filter(function (ev) {
+      return ev.getTitle().indexOf('【ゆうき】') === 0 || ev.getTitle().indexOf('【みつき】') === 0;
+    })
+    .map(function (ev) {
+      return {
+        title: ev.getTitle(),
+        start: ev.getStartTime().toISOString(),
+        end: ev.getEndTime().toISOString(),
+        allDay: ev.isAllDayEvent(),
+      };
+    });
+
+  Logger.log('=== 予定の書き出し(' + Utilities.formatDate(dayStart, 'Asia/Tokyo', 'yyyy-MM-dd') +
+    ' から ' + dayCount + '日分、' + result.length + '件。※家族の予定を含むためログの取り扱いに注意) ===');
+  Logger.log(JSON.stringify(result));
 }
