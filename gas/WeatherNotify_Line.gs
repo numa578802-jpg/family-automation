@@ -33,18 +33,32 @@
 const LINE_PUSH_URL_ = 'https://api.line.me/v2/bot/message/push';
 const LINE_REPLY_URL_ = 'https://api.line.me/v2/bot/message/reply';
 
+/**
+ * 河川水位情報リンクを末尾に付与する共通関数(項目A1)。
+ * 天気×カレンダー通知のLINE送信は、すべてsendLinePushMessage_を経由する(sendLinePushToRecipients_・
+ * scheduleBikeDepartureAlerts_の本人のみ送信も含め、この関数が唯一の送信口)。そのためリンクの付与を
+ * この1箇所に集約すれば、通知の種類ごとに個別対応する必要が無く、新しい通知を追加した際の
+ * 付け忘れも起こり得ない。水位の自動取得・自動判定は行わず、常に固定URLのリンクのみを付ける
+ * (buildRiverLevelInfoLine_、WeatherNotify_SafetyAlerts.gs参照)。
+ */
+function appendRiverLevelInfoLine_(text) {
+  const riverLine = buildRiverLevelInfoLine_();
+  return riverLine ? text + '\n\n' + riverLine : text;
+}
+
 // ==== LINEへpushメッセージを送信(DRY_RUN時は送信せずログのみ) ====
 // accessTokenを省略した場合は、検証・デバッグ用チャネル(LINE_CHANNEL_ACCESS_TOKEN)を使う。
 // channelLabelを渡すと、全ログ行の先頭に「[ゆうき用]」のように前置する(項目F)。
 function sendLinePushMessage_(userId, text, accessToken, channelLabel) {
   const config = getWeatherConfig_();
   const logPrefix = channelLabel ? '[' + channelLabel + '] ' : '';
+  const fullText = appendRiverLevelInfoLine_(text); // 項目A1: 全通知の末尾に河川水位リンクを付ける(共通経路)
   if (!userId) {
     Logger.log(logPrefix + 'userId未登録のため送信をスキップしました。');
     return;
   }
   if (config.dryRun) {
-    Logger.log(logPrefix + '[DRY_RUN] LINE送信をスキップ(実際には送信しません) 宛先: ' + userId + '\n本文:\n' + text);
+    Logger.log(logPrefix + '[DRY_RUN] LINE送信をスキップ(実際には送信しません) 宛先: ' + userId + '\n本文:\n' + fullText);
     return;
   }
   const token = accessToken || config.lineChannelAccessToken;
@@ -55,7 +69,7 @@ function sendLinePushMessage_(userId, text, accessToken, channelLabel) {
 
   const payload = {
     to: userId,
-    messages: [{ type: 'text', text: text }],
+    messages: [{ type: 'text', text: fullText }],
   };
   const response = UrlFetchApp.fetch(LINE_PUSH_URL_, {
     method: 'post',

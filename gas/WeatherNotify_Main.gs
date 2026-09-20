@@ -75,7 +75,9 @@ function runWeatherNotification_(targetDate, isFinal) {
 
   // 朝の登校提案メッセージに付ける安全情報。
   // 危険警報は本文より優先度が高いため冒頭に配置(確定版のみ判定。現状はmatchesDangerWarning_が
-  // 未実装のため常にnullを返す暫定実装)。河川水位情報リンクは本文の末尾に追記する(常時固定表示。自動取得はしない)。
+  // 未実装のため常にnullを返す暫定実装)。河川水位情報リンクは、送信の共通経路
+  // (sendLinePushMessage_、WeatherNotify_Line.gs)が全メッセージの末尾に一律で付与するため、
+  // ここでは扱わない(項目A1。付け忘れを防ぐため、メッセージ種類ごとに個別対応しない設計)。
   let dangerWarningPrefix = '';
   if (isFinal) {
     try {
@@ -85,14 +87,12 @@ function runWeatherNotification_(targetDate, isFinal) {
       Logger.log('危険警報チェックの呼び出しでエラー(通知全体は続行します): ' + e.message);
     }
   }
-  const riverLine = buildRiverLevelInfoLine_();
-  const riverSuffix = riverLine ? '\n\n' + riverLine : '';
 
   // ゆうきさん(バス/自転車提案。朝・帰り往復で判定) → ゆうき本人 + 一志さん・きくみさん(CC、内容確認用)
   try {
     if (isYukiSchoolDay_(targetDate, calendarId)) {
       const result = decideYukiTransport_(targetDate, isFinal, calendarId);
-      const message = dangerWarningPrefix + buildYukiMessage_(targetDate, result, isFinal) + riverSuffix;
+      const message = dangerWarningPrefix + buildYukiMessage_(targetDate, result, isFinal);
       sendLinePushToRecipients_(getPersonNotifyRecipients_(config, 'YUKI'), message);
     } else {
       Logger.log('ゆうきさん: ' + dateStr + ' は登校日ではないため登校 天気予報をスキップしました。');
@@ -121,7 +121,7 @@ function runWeatherNotification_(targetDate, isFinal) {
 
     try {
       sendCombinedDepartureNotices_(person.key, person.label, targetDate, isFinal, sections,
-        getPersonNotifyRecipients_(config, person.key), dangerWarningPrefix, riverSuffix);
+        getPersonNotifyRecipients_(config, person.key), dangerWarningPrefix);
     } catch (e) {
       Logger.log(person.label + 'の出発まわりの通知の送信処理でエラー: ' + e.message);
     }
@@ -374,7 +374,7 @@ function diffDepartureNotice_(result, previousSnapshots) {
  *   知らせるため確定版を送る。buildCombinedDiffSummary_の「予定が無くなりました」参照)。
  * ------------------------------------------------------------
  */
-function sendCombinedDepartureNotices_(personKey, personLabel, targetDate, isFinal, sections, recipients, dangerWarningPrefix, riverSuffix) {
+function sendCombinedDepartureNotices_(personKey, personLabel, targetDate, isFinal, sections, recipients, dangerWarningPrefix) {
   const dateStr = Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyy-MM-dd');
   const props = PropertiesService.getScriptProperties();
   const snapshotKey = departureNoticeSnapshotKey_(personKey, targetDate);
@@ -385,7 +385,7 @@ function sendCombinedDepartureNotices_(personKey, personLabel, targetDate, isFin
       props.deleteProperty(snapshotKey);
       return;
     }
-    const message = dangerWarningPrefix + buildCombinedDepartureMessage_(targetDate, personLabel, sections, isFinal, null) + riverSuffix;
+    const message = dangerWarningPrefix + buildCombinedDepartureMessage_(targetDate, personLabel, sections, isFinal, null);
     sendLinePushToRecipients_(recipients, message);
     props.setProperty(snapshotKey, JSON.stringify(sections.map(toDepartureNoticeSnapshot_)));
     return;
@@ -402,7 +402,7 @@ function sendCombinedDepartureNotices_(personKey, personLabel, targetDate, isFin
   }
 
   const diffSummary = buildCombinedDiffSummary_(sections, previousSnapshots);
-  const message = dangerWarningPrefix + buildCombinedDepartureMessage_(targetDate, personLabel, sections, isFinal, diffSummary) + riverSuffix;
+  const message = dangerWarningPrefix + buildCombinedDepartureMessage_(targetDate, personLabel, sections, isFinal, diffSummary);
   sendLinePushToRecipients_(recipients, message);
   props.deleteProperty(snapshotKey); // この日の確定版処理が終わったらスナップショットは不要
 }
@@ -660,8 +660,7 @@ function buildHomewardRainAlertMessage_(personLabel, homewardTime, rainSpotDetai
   }
   const sourceLine = buildSourceLinksLine_(false, rainSpotDetails.length > 0);
   if (sourceLine) lines.push(sourceLine);
-  const riverLine = buildRiverLevelInfoLine_();
-  if (riverLine) lines.push(riverLine);
+  // 河川水位リンクは送信の共通経路(sendLinePushMessage_)が付与するため、ここでは付けない(項目A1)。
   return lines.join('\n');
 }
 
@@ -768,8 +767,7 @@ function buildYukiStationNoticeMessage_(label, endTime, rainSpotDetails) {
     '学校を出てから若林駅までは、' + getYukiStationArrivalMinMin_() + '〜' + getYukiStationArrivalMaxMin_() + '分ほどかかる見込みです。');
   const sourceLine = buildSourceLinksLine_(false, rainSpotDetails.length > 0);
   if (sourceLine) lines.push(sourceLine);
-  const riverLine = buildRiverLevelInfoLine_();
-  if (riverLine) lines.push(riverLine);
+  // 河川水位リンクは送信の共通経路(sendLinePushMessage_)が付与するため、ここでは付けない(項目A1)。
   return lines.join('\n');
 }
 
