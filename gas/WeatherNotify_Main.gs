@@ -372,6 +372,10 @@ function diffDepartureNotice_(result, previousSnapshots) {
  *   (buildCombinedDiffSummary_)。暫定版・確定版とも対象が0件であればスキップする
  *   (ただし暫定版で送ったのに確定版で対象が0件になった=全て無くなった場合は、その旨を
  *   知らせるため確定版を送る。buildCombinedDiffSummary_の「予定が無くなりました」参照)。
+ * ・項目A5: 暫定版が対象0件だった場合もスナップショットは削除せず空配列[]を保存する
+ *   (プロパティ自体が無い=暫定版が実行されていない、というケースと区別するため)。
+ *   確定版側でスナップショットがnull(=暫定版が実行されていない)の場合は、新規に追加された
+ *   予定を1件ずつ「新規の予定です」と列挙せず、「(暫定版なし)」とだけ冒頭に出す。
  * ------------------------------------------------------------
  */
 function sendCombinedDepartureNotices_(personKey, personLabel, targetDate, isFinal, sections, recipients, dangerWarningPrefix) {
@@ -382,7 +386,9 @@ function sendCombinedDepartureNotices_(personKey, personLabel, targetDate, isFin
   if (!isFinal) {
     if (sections.length === 0) {
       Logger.log(personLabel + ': ' + dateStr + ' は出発まわりの通知の対象が無いためスキップしました。');
-      props.deleteProperty(snapshotKey);
+      // 項目A5: 削除ではなく空配列を保存する。プロパティ自体が無い(=暫定版が実行されていない)場合と
+      // 区別できるようにするため(確定版側のbuildCombinedDiffSummary_参照)。
+      props.setProperty(snapshotKey, JSON.stringify([]));
       return;
     }
     const message = dangerWarningPrefix + buildCombinedDepartureMessage_(targetDate, personLabel, sections, isFinal, null);
@@ -409,6 +415,12 @@ function sendCombinedDepartureNotices_(personKey, personLabel, targetDate, isFin
 
 // ==== 確定版の冒頭に出す変更点の要約(項目A1)。変化が無ければ「変更なし」を返す ====
 function buildCombinedDiffSummary_(sections, previousSnapshots) {
+  // 項目A5: previousSnapshotsがnull(=プロパティ自体が無い。前日の暫定版が実行されていない)場合は、
+  // 各予定を「新規の予定です」と列挙せず、その旨だけをまとめて1回報告する。暫定版が実行されて
+  // 対象が0件だった日(previousSnapshotsは空配列[])は、この分岐に入らず従来どおり「新規の予定です」になる。
+  if (previousSnapshots === null) {
+    return '暫定版なし';
+  }
   const parts = [];
   sections.forEach(function (result) {
     const diff = diffDepartureNotice_(result, previousSnapshots);
@@ -435,6 +447,9 @@ function buildDepartureNoticeSectionLines_(result) {
     lines.push('予定: ' + result.label + '(' + startLabel + '〜)');
     if (result.pop !== null) {
       lines.push('降水確率: ' + result.pop + '%');
+    } else {
+      // 項目A4: ゆうきさんの朝の通知と表現を揃える(黙って省略しない)
+      lines.push('降水確率を取得できませんでした。');
     }
     if (result.isRaining) {
       lines.push('雨天のためカッパを準備してください。');
@@ -479,13 +494,20 @@ function buildDepartureNoticeSectionLines_(result) {
     if (result.isRaining && result.bufferMin > 0) detailParts.push('雨天バッファ+' + result.bufferMin + '分');
     lines.push('家を出る目安: ' + departureLabel + '頃(' + detailParts.join(' + ') + ')');
 
+    // 項目A4: 行き・帰りいずれかの降水確率が取得できていない場合、escortNeeded=falseは
+    // 「送迎不要と確認できた」のではなく「判定できなかった」だけなので、「必要なさそうです」とは
+    // 出さず、ゆうきさんの朝の通知と同じ「降水確率を取得できませんでした」の表現に揃えて案内する。
+    // 一方どちらかが雨天と確認できてescortNeeded=trueの場合は、データが揃っていなくても
+    // そのまま案内する(もう片方が不明でも「検討してください」の判断は変わらないため)。
     if (result.escortNeeded) {
       const rainyLegs = [];
       if (result.go.rainy) rainyLegs.push('行き');
       if (result.ret.rainy) rainyLegs.push('帰り');
       lines.push('車での送迎: 検討してください(' + rainyLegs.join('・') + 'が雨天のため)。');
-    } else {
+    } else if (result.go.usedPop && result.ret.usedPop) {
       lines.push('車での送迎: 必要なさそうです。');
+    } else {
+      lines.push('降水確率を取得できませんでした。送迎の要否は判断できません。');
     }
   }
 

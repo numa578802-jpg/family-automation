@@ -70,18 +70,21 @@ function testYukiLogicCases() {
 
 // ==== みつきさんの登校(自転車通学)出発時刻お知らせ(項目B)の単体テスト(固定データ、ネットワークアクセス無し) ====
 function testMitsukiLogicCases() {
+  // calcBikeDeparture_はmarginMin(第5引数)が必須(項目A3で追加)。以下の3ケースはmarginMinを
+  // 渡さない旧仕様のままだった呼び出し不備(テスト側のバグ)を修正し、marginMin=0を明示して
+  // 従来どおりの期待値(自転車移動時間+雨天バッファのみ)で検証する。
   const config = { popThreshold: 50, mitsukiRainBufferMin: 10 };
   const startTime = new Date('2026-08-13T09:00:00+09:00');
 
   const cases = [
-    { name: '晴れ・自転車25分→バッファ無し', travelMinutes: 25, pop: 20, expectDeparture: '2026-08-13T08:35:00+09:00' },
-    { name: '雨天・自転車25分→+10分バッファ', travelMinutes: 25, pop: 80, expectDeparture: '2026-08-13T08:25:00+09:00' },
-    { name: 'PoP境界値50%→雨天扱い', travelMinutes: 20, pop: 50, expectDeparture: '2026-08-13T08:30:00+09:00' },
+    { name: '晴れ・自転車25分→バッファ無し', travelMinutes: 25, pop: 20, marginMin: 0, expectDeparture: '2026-08-13T08:35:00+09:00' },
+    { name: '雨天・自転車25分→+10分バッファ', travelMinutes: 25, pop: 80, marginMin: 0, expectDeparture: '2026-08-13T08:25:00+09:00' },
+    { name: 'PoP境界値50%→雨天扱い', travelMinutes: 20, pop: 50, marginMin: 0, expectDeparture: '2026-08-13T08:30:00+09:00' },
   ];
 
   let okCount = 0;
   cases.forEach(function (c) {
-    const result = calcBikeDeparture_(startTime, c.travelMinutes, c.pop, config);
+    const result = calcBikeDeparture_(startTime, c.travelMinutes, c.pop, config, c.marginMin);
     const expected = new Date(c.expectDeparture);
     const pass = result.departureTime.getTime() === expected.getTime();
     if (pass) okCount++;
@@ -91,11 +94,24 @@ function testMitsukiLogicCases() {
   });
   Logger.log('みつきさん登校ロジックテスト: ' + okCount + '/' + cases.length + ' 件成功');
 
-  const bike = calcBikeDeparture_(startTime, 25, 80, config);
+  // 本番の登校(SCHOOL_COMMUTE)経路と同じ引数(marginMin=ARRIVAL_MARGIN_SCHOOL_MIN、雨天バッファは
+  // 本番既定値の0)で計算し、雨天(PoP80%)でも出発目安が7:50固定になることを確認する(項目A2)。
+  const schoolConfig = { popThreshold: 50, mitsukiRainBufferMin: 0 };
+  const schoolStartTime = new Date('2026-08-13T08:15:00+09:00');
+  const schoolMarginMin = getArrivalMarginSchoolMin_();
+  const schoolBike = calcBikeDeparture_(schoolStartTime, 15, 80, schoolConfig, schoolMarginMin);
+  const schoolExpected = new Date('2026-08-13T07:50:00+09:00');
+  const schoolPass = schoolBike.departureTime.getTime() === schoolExpected.getTime();
+  Logger.log((schoolPass ? '[OK] ' : '[NG] ') +
+    '本番既定値相当(雨天バッファ0・登校の余裕' + schoolMarginMin + '分)で雨天でも7:50固定 => 出発 ' +
+    Utilities.formatDate(schoolBike.departureTime, 'Asia/Tokyo', 'H:mm') +
+    '(期待値 ' + Utilities.formatDate(schoolExpected, 'Asia/Tokyo', 'H:mm') + ')');
+
+  const bike = calcBikeDeparture_(startTime, 25, 80, config, 0);
   const sample = {
     label: '登校(通常授業)', startTime: startTime, departureTime: bike.departureTime,
     travelMinutes: bike.travelMinutes, isRaining: bike.isRaining, bufferMin: bike.bufferMin,
-    pop: bike.pop, usedPop: bike.usedPop,
+    marginMin: bike.marginMin, pop: bike.pop, usedPop: bike.usedPop,
   };
   Logger.log('--- メッセージサンプル(暫定版・雨天) ---\n' + buildMitsukiSchoolCommuteMessage_(startTime, sample, false));
   Logger.log('--- メッセージサンプル(確定版・雨天) ---\n' + buildMitsukiSchoolCommuteMessage_(startTime, sample, true));

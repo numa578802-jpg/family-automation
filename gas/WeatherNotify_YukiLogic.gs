@@ -59,6 +59,8 @@ const YUKI_LESSON_NAMES_ = [];
  * これらの検索値をYUKI_TRAIN_MIN/YUKI_WALK_FALLBACK_MIN/YUKI_CAR_TO_STATION_FALLBACK_MINの
  * 既定値として採用した。採用する値は常にこれらの固定値(スクリプトプロパティ)を優先し、
  * Mapsの実測値は比較のためログに出すのみで、計算には使わない方針に変更した(calcYukiTransitDetails_参照)。
+ * その後、testYukiTravelTimes()による実機のMaps検証(TRANSITモード、status=OK)で電車の所要時間が
+ * 28分程度と確認できたため、YUKI_TRAIN_MINの既定値を26→28分に更新した(車25分は変更なし)。
  */
 // 車(自宅→若林駅)の所要時間(分)。ユーザー申告値=25分。固定値として採用する(Mapsの結果はログ比較のみ)
 const YUKI_CAR_TO_STATION_FALLBACK_MIN_PROP_ = 'YUKI_CAR_TO_STATION_FALLBACK_MIN';
@@ -100,9 +102,10 @@ function getYukiWalkMarginMin_() {
   return value && !isNaN(n) ? n : YUKI_WALK_MARGIN_MIN_FALLBACK_;
 }
 
-// 電車(若林駅→刈谷市駅)の所要時間(分)。2026/9/21朝の実地検索値=26分(知立乗換1回、待ち含む)を既定値として採用
+// 電車(若林駅→刈谷市駅)の所要時間(分)。実機のMaps検証(testYukiTravelTimes、TRANSITモード)で
+// 28分程度(status=OK)が確認できたため、既定値として28分を採用(ユーザー決定)
 const YUKI_TRAIN_MIN_PROP_ = 'YUKI_TRAIN_MIN';
-const YUKI_TRAIN_MIN_FALLBACK_ = 26;
+const YUKI_TRAIN_MIN_FALLBACK_ = 28;
 
 function getYukiTrainMin_() {
   const value = PropertiesService.getScriptProperties().getProperty(YUKI_TRAIN_MIN_PROP_);
