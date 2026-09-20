@@ -196,6 +196,11 @@ function logLineChannelQuotaConsumption_() {
   });
 }
 
+// ==== 当月消費数を確認するための公開ラッパー(GASエディタの関数選択プルダウンから手動実行する用) ====
+function checkLineQuota() {
+  logLineChannelQuotaConsumption_();
+}
+
 // ==== LINE Webhookのエントリーポイント(友だち追加後のuserId自動登録) ====
 function doPost(e) {
   const props = PropertiesService.getScriptProperties();
