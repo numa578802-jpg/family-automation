@@ -58,8 +58,11 @@
  *   YUKI_STATION_ARRIVAL_MAX_MIN       … 同、上限(分、デフォルト60、仮値)
  *   YUKI_STATION_NOTICE_CC             … 上記通知に一志さん・きくみさんをCCで含めるか("true"/"false"、デフォルトtrue。
  *                                        運用序盤の状況確認用。falseにすると本人のみに送る。項目A3)
- *   CAR_PICKUP_ALERT_SUPPRESS_NEAR_FINAL_MIN … 直前アラート・自転車の出発直前アラートの予約時刻が、確定版配信時刻
- *                                        (実行時刻)の前後何分以内なら送らないか(分、デフォルト60、仮値。項目A5)
+ *   CAR_PICKUP_ALERT_SUPPRESS_NEAR_FINAL_MIN … 直前アラート・自転車の出発直前アラートの予約時刻が、確定版配信時刻の
+ *                                        前後何分以内なら送らないか(分、デフォルト60、仮値。項目A5)
+ *   FINAL_NOTICE_HOUR / FINAL_NOTICE_MINUTE … 上記の抑制判定で「確定版配信時刻」とみなす名目上の時・分
+ *                                        (デフォルト6時30分、仮値。項目A3で新設。実際のトリガー発火時刻
+ *                                        ではなく、setupWeatherTriggers()のnearMinute設定と同じ目安値)
  * ------------------------------------------------------------
  */
 
@@ -405,10 +408,8 @@ function getBikeDepartureAlertLeadMin_() {
   return value && !isNaN(n) ? n : BIKE_DEPARTURE_ALERT_LEAD_MIN_FALLBACK_;
 }
 
-// ==== 直前アラート・自転車の出発直前アラートを、確定版配信時刻(実行時刻)の前後何分以内なら抑制するか(項目A5・仮値) ====
-// 確定版配信直後に「直前」を謳うアラートが二重に届くのを避けるための抑制ルール。
-// 「配信時刻」は固定の6:30ではなく、実際にsendFinalNotification()が実行された時刻(=このプロパティを
-// 参照する時点のDate.now())を基準にする(実際の発火が6:30きっかりとは限らないため。B1参照)。
+// ==== 直前アラート・自転車の出発直前アラートを、確定版配信時刻の前後何分以内なら抑制するか(項目A5・仮値) ====
+// 確定版配信直後に「直前」を謳うアラートが二重に届くのを避けるための抑制ルール。60分の値は変更していない。
 const CAR_PICKUP_ALERT_SUPPRESS_NEAR_FINAL_MIN_PROP_ = 'CAR_PICKUP_ALERT_SUPPRESS_NEAR_FINAL_MIN';
 const CAR_PICKUP_ALERT_SUPPRESS_NEAR_FINAL_MIN_FALLBACK_ = 60;
 
@@ -416,6 +417,40 @@ function getCarPickupAlertSuppressNearFinalMin_() {
   const value = PropertiesService.getScriptProperties().getProperty(CAR_PICKUP_ALERT_SUPPRESS_NEAR_FINAL_MIN_PROP_);
   const n = Number(value);
   return value && !isNaN(n) ? n : CAR_PICKUP_ALERT_SUPPRESS_NEAR_FINAL_MIN_FALLBACK_;
+}
+
+/**
+ * 確定版配信時刻の「名目上の」時・分(項目A3で新設・仮値)。
+ * 以前は上記の抑制判定の基準に実行時刻(Date.now())をそのまま使っていたが、これだと手動テストの
+ * 実行時刻によって抑制されたりされなかったりし、本番(確定版トリガーが6:30頃に実行される)と
+ * 同じ判定にならなかった。この定数は対象日の「6:30」を表す固定の目安であり、実際のトリガー発火時刻
+ * (B1で調査済みのとおり6:37頃になることがある)とは独立している。本番の動作(確定版の実行中に
+ * 直前アラート等を予約する、という処理の流れ自体)は変更していない。setupWeatherTriggers()の
+ * atHour(6).nearMinute(30)と値を合わせているが、参照はしておらず、別々に変更が必要な点に注意。
+ */
+const FINAL_NOTICE_HOUR_PROP_ = 'FINAL_NOTICE_HOUR';
+const FINAL_NOTICE_HOUR_FALLBACK_ = 6;
+
+function getFinalNoticeHour_() {
+  const value = PropertiesService.getScriptProperties().getProperty(FINAL_NOTICE_HOUR_PROP_);
+  const n = Number(value);
+  return value && !isNaN(n) ? n : FINAL_NOTICE_HOUR_FALLBACK_;
+}
+
+const FINAL_NOTICE_MINUTE_PROP_ = 'FINAL_NOTICE_MINUTE';
+const FINAL_NOTICE_MINUTE_FALLBACK_ = 30;
+
+function getFinalNoticeMinute_() {
+  const value = PropertiesService.getScriptProperties().getProperty(FINAL_NOTICE_MINUTE_PROP_);
+  const n = Number(value);
+  return value && !isNaN(n) ? n : FINAL_NOTICE_MINUTE_FALLBACK_;
+}
+
+// ==== 対象日の「確定版配信時刻」の名目値(FINAL_NOTICE_HOUR:FINAL_NOTICE_MINUTE)をDateで返す(項目A3) ====
+function getFinalNoticeTimeFor_(targetDate) {
+  const dateStr = Utilities.formatDate(targetDate, 'Asia/Tokyo', 'yyyy-MM-dd');
+  const pad2 = function (n) { return (n < 10 ? '0' : '') + n; };
+  return new Date(dateStr + 'T' + pad2(getFinalNoticeHour_()) + ':' + pad2(getFinalNoticeMinute_()) + ':00');
 }
 
 // ==== 到着の余裕(自転車の出発目安の計算に加える。項目2。初期値0=余裕を見ない) ====

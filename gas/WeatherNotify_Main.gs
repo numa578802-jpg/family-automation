@@ -263,13 +263,23 @@ function departureNoticeSnapshotKey_(personKey, targetDate) {
 // 差分比較用に、送信に必要な最小限のフィールドだけをスナップショットとして保存する
 function toDepartureNoticeSnapshot_(result) {
   if (result.mode === 'CAR') {
-    return { label: result.label, mode: 'CAR', startTime: result.startTime.toISOString() };
+    // 項目A4: 出発目安・お迎え目安(終了時刻)の変化も検知できるよう、endTime/pickupTimeを保持する
+    return {
+      label: result.label,
+      mode: 'CAR',
+      startTime: result.startTime.toISOString(),
+      endTime: result.endTime ? result.endTime.toISOString() : null,
+      departureTime: result.departureTime.toISOString(),
+      pickupTime: result.pickupTime ? result.pickupTime.toISOString() : null,
+    };
   }
   if (result.mode === 'TRANSIT') {
+    // 項目A4: 終了時刻の変化も検知できるよう、endTimeを保持する
     return {
       label: result.label,
       mode: 'TRANSIT',
       startTime: result.startTime.toISOString(),
+      endTime: result.endTime ? result.endTime.toISOString() : null,
       departureTime: result.departureTime.toISOString(),
     };
   }
@@ -303,8 +313,26 @@ function diffDepartureNotice_(result, previousSnapshots) {
   const prevStartLabel = Utilities.formatDate(new Date(prev.startTime), 'Asia/Tokyo', 'H:mm');
   if (startLabel !== prevStartLabel) changes.push('予定時刻: ' + prevStartLabel + ' → ' + startLabel);
 
+  // 任意のDateフィールド(終了時刻等、値が無いことがあるもの)の変化を比較するヘルパー(項目A4)
+  function pushOptionalTimeChange_(fieldLabel, newDate, prevIso) {
+    if (newDate && prevIso) {
+      const newLabel = Utilities.formatDate(newDate, 'Asia/Tokyo', 'H:mm');
+      const prevLabel = Utilities.formatDate(new Date(prevIso), 'Asia/Tokyo', 'H:mm');
+      if (newLabel !== prevLabel) changes.push(fieldLabel + ': ' + prevLabel + ' → ' + newLabel);
+    } else if (newDate && !prevIso) {
+      changes.push(fieldLabel + 'が算出できるようになりました: ' + Utilities.formatDate(newDate, 'Asia/Tokyo', 'H:mm'));
+    } else if (!newDate && prevIso) {
+      changes.push(fieldLabel + 'が算出できなくなりました');
+    }
+  }
+
   if (result.mode !== prev.mode) {
     changes.push('移動手段が変わりました(' + prev.mode + ' → ' + result.mode + ')');
+  } else if (result.mode === 'CAR') {
+    // 項目A4(今回新設): みつきの英語等、CARモードは以前は予定時刻(startTime)の変化しか検知していなかった。
+    // 出発目安・お迎え目安(終了時刻)の変化も検知するようにした。
+    pushOptionalTimeChange_('出発目安', result.departureTime, prev.departureTime);
+    pushOptionalTimeChange_('帰りのお迎え目安', result.pickupTime, prev.pickupTime);
   } else if (result.mode === 'BIKE') {
     const depLabel = Utilities.formatDate(result.departureTime, 'Asia/Tokyo', 'H:mm');
     const prevDepLabel = Utilities.formatDate(new Date(prev.departureTime), 'Asia/Tokyo', 'H:mm');
@@ -319,6 +347,8 @@ function diffDepartureNotice_(result, previousSnapshots) {
     const depLabel = Utilities.formatDate(result.departureTime, 'Asia/Tokyo', 'H:mm');
     const prevDepLabel = Utilities.formatDate(new Date(prev.departureTime), 'Asia/Tokyo', 'H:mm');
     if (depLabel !== prevDepLabel) changes.push('家を出る目安: ' + prevDepLabel + ' → ' + depLabel);
+    // 項目A4(今回新設): 終了時刻の変化も検知する
+    pushOptionalTimeChange_('終了予定', result.endTime, prev.endTime);
   } else if (result.mode === 'SCHOOL_COMMUTE') {
     const depLabel = Utilities.formatDate(result.departureTime, 'Asia/Tokyo', 'H:mm');
     const prevDepLabel = Utilities.formatDate(new Date(prev.departureTime), 'Asia/Tokyo', 'H:mm');
@@ -478,7 +508,7 @@ function buildDepartureNoticeMessage_(targetDate, personLabel, result, isFinal, 
   if (sourceLine) lines.push(sourceLine);
 
   if (!isFinal) {
-    lines.push('※判断に変更があれば当日6:30頃に確定版をお送りします');
+    lines.push('※当日6:30頃に確定版をお送りします'); // 項目A2: 確定版は常に送るため(項目A1)、「判断に変更があれば」の条件表現を外した
   }
   return lines.join('\n');
 }
@@ -509,7 +539,7 @@ function buildCombinedDepartureMessage_(targetDate, personLabel, sections, isFin
   if (sourceLine) lines.push(sourceLine);
 
   if (!isFinal) {
-    lines.push('※判断に変更があれば当日6:30頃に確定版をお送りします');
+    lines.push('※当日6:30頃に確定版をお送りします'); // 項目A2: 確定版は常に送るため(項目A1)、「判断に変更があれば」の条件表現を外した
   }
   return lines.join('\n');
 }
@@ -750,8 +780,10 @@ function buildYukiStationNoticeMessage_(label, endTime, rainSpotDetails) {
  * 除外している(いったん帰宅してから家庭発で出発する予定のため、学校発の帰り予定時刻の算出対象には
  * 含めない設計。上記参照)。そのため従来、お茶自体の帰り(お茶の終了時刻を基準にした)雨雲アラートは
  * 存在しなかった。この関数はその欠落を埋め、お茶の終了時刻のHOMEWARD_ALERT_LEAD_MIN分前(既存の
- * 帰りの雨雲アラートと同じ既定30分)に、既存の「みつきの下校時雨雲アラート」と同じ地点(自宅・
- * 前林中学校)・宛先で通知する。英語(車で迎え、CARモード)は対象外(現状維持。車送迎のため)。
+ * 帰りの雨雲アラートと同じ既定30分)に、既存の「みつきの下校時雨雲アラート」と同じ宛先で通知する。
+ * 対象地点は自宅のみ(項目A1で確定・ユーザー承認済み。お茶の教室は自宅周辺のため前林中学校は
+ * 含めない。下校時雨雲アラート側は登校日・部活の帰りが対象のため、引き続き自宅+前林中学校のまま
+ * 変更していない)。英語(車で迎え、CARモード)は対象外(現状維持。車送迎のため)。
  * 対象はBIKEモードかつMITSUKI_LESSON_NAMES_に一致する予定(現状は「お茶」のみ該当。英語はCARモードの
  * ため自動的に対象外)。お茶自体の場所(location)が取れる場合にその地点を雨雲判定に使う設計は、
  * 今回は見送った(調査結果は報告参照。getMaxForecastRainfallMmh_はWEATHER_LOCATIONS_の固定キーのみ
@@ -813,7 +845,9 @@ function runScheduledMitsukiLessonRainAlerts_(e) {
 
     try {
       const rainSpotDetails = [];
-      ['HOME', 'SCHOOL_MITSUKI'].forEach(function (locKey) {
+      // 項目A1(今回): 対象は自宅のみ(ユーザー承認済み)。お茶の教室は自宅周辺のため、
+      // 前林中学校を含める必要が無く、お茶自身の場所(location)を使う実装も不要と判断した。
+      ['HOME'].forEach(function (locKey) {
         const mmh = getMaxForecastRainfallMmh_(locKey);
         if (mmh !== null) rainSpotDetails.push({ label: WEATHER_LOCATIONS_[locKey].label, mmh: mmh });
       });
@@ -846,7 +880,11 @@ const CAR_PICKUP_ALERT_PENDING_PREFIX_ = 'PENDING_CAR_PICKUP_ALERT_';
 // ==== 確定版配信時に、出発まわりの通知でCAR/TRANSITモードだった予定それぞれの直前アラートを予約する ====
 function scheduleCarPickupAlerts_(targetDate, calendarId, departureNoticesByPerson) {
   const leadMin = getCarPickupAlertLeadMin_();
-  const nowMs = Date.now(); // 項目A5: 「確定版の配信時刻」は、この関数が実行された時刻(=確定版配信の実行時刻そのもの)を基準にする
+  const nowMs = Date.now(); // 「本当に過去かどうか」の判定にのみ使う(実際の現在時刻)
+  // 項目A3: 抑制判定(下記)の基準は実行時刻ではなく、対象日の「確定版配信時刻」の名目値(6:30、仮値)に
+  // する。手動テストの実行時刻に関わらず、本番と同じ判定になるようにするための変更。本番の動作
+  // (確定版の実行中に直前アラート等を予約する、という処理の流れ自体)は変更していない。
+  const finalNoticeMs = getFinalNoticeTimeFor_(targetDate).getTime();
 
   ['YUKI', 'MITSUKI'].forEach(function (personKey) {
     const personLabel = personKey === 'YUKI' ? 'ゆうき' : 'みつき';
@@ -859,11 +897,12 @@ function scheduleCarPickupAlerts_(targetDate, calendarId, departureNoticesByPers
         Logger.log(personLabel + ': ' + target.label + '(家を出る目安 ' + target.departureTime + ')が近すぎる/過去のため、直前アラートは予約しませんでした。');
         return;
       }
-      // 項目A5: 直前アラートの予約時刻が、確定版配信時刻(=現在時刻)の前後60分(仮値)以内なら出さない
-      // (確定版本文で既に同じ内容が案内済みのため、直後に「直前」アラートが重ねて届くのを避ける)。
+      // 項目A5(項目A3で基準を変更): 直前アラートの予約時刻が、確定版配信時刻(名目6:30、仮値)の
+      // 前後60分(仮値)以内なら出さない(確定版本文で既に同じ内容が案内済みのため、直後に
+      // 「直前」アラートが重ねて届くのを避ける)。
       const suppressMin = getCarPickupAlertSuppressNearFinalMin_();
-      if ((alertTime.getTime() - nowMs) / (60 * 1000) <= suppressMin) {
-        Logger.log(personLabel + ': ' + target.label + 'の直前アラート予定時刻(' + alertTime + ')が確定版配信時刻から' +
+      if ((alertTime.getTime() - finalNoticeMs) / (60 * 1000) <= suppressMin) {
+        Logger.log(personLabel + ': ' + target.label + 'の直前アラート予定時刻(' + alertTime + ')が確定版配信時刻(名目)から' +
           suppressMin + '分以内のため、予約しませんでした(項目A5)。');
         return;
       }
@@ -1048,7 +1087,9 @@ const BIKE_DEPARTURE_ALERT_PENDING_PREFIX_ = 'PENDING_BIKE_DEPARTURE_ALERT_';
 // ==== 確定版配信時に、出発まわりの通知でBIKEモードだった予定それぞれの出発直前アラートを予約する ====
 function scheduleBikeDepartureAlerts_(targetDate, calendarId, departureNoticesByPerson) {
   const leadMin = getBikeDepartureAlertLeadMin_();
-  const nowMs = Date.now(); // 項目A5: 「確定版の配信時刻」は、この関数が実行された時刻を基準にする
+  const nowMs = Date.now(); // 「本当に過去かどうか」の判定にのみ使う(実際の現在時刻)
+  // 項目A3: 抑制判定(下記)の基準は実行時刻ではなく、対象日の「確定版配信時刻」の名目値(6:30、仮値)にする。
+  const finalNoticeMs = getFinalNoticeTimeFor_(targetDate).getTime();
 
   ['YUKI', 'MITSUKI'].forEach(function (personKey) {
     const personLabel = personKey === 'YUKI' ? 'ゆうき' : 'みつき';
@@ -1061,10 +1102,11 @@ function scheduleBikeDepartureAlerts_(targetDate, calendarId, departureNoticesBy
         Logger.log(personLabel + ': ' + target.label + '(出発目安 ' + target.departureTime + ')が近すぎる/過去のため、自転車の出発直前アラートは予約しませんでした。');
         return;
       }
-      // 項目A5: 直前アラートと同じ抑制ルール(確定版配信時刻の前後60分・仮値以内なら出さない)
+      // 項目A5(項目A3で基準を変更): 直前アラートと同じ抑制ルール(確定版配信時刻(名目、仮値)の
+      // 前後60分・仮値以内なら出さない)
       const suppressMin = getCarPickupAlertSuppressNearFinalMin_();
-      if ((alertTime.getTime() - nowMs) / (60 * 1000) <= suppressMin) {
-        Logger.log(personLabel + ': ' + target.label + 'の自転車の出発直前アラート予定時刻(' + alertTime + ')が確定版配信時刻から' +
+      if ((alertTime.getTime() - finalNoticeMs) / (60 * 1000) <= suppressMin) {
+        Logger.log(personLabel + ': ' + target.label + 'の自転車の出発直前アラート予定時刻(' + alertTime + ')が確定版配信時刻(名目)から' +
           suppressMin + '分以内のため、予約しませんでした(項目A5)。');
         return;
       }
