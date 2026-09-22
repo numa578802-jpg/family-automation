@@ -88,6 +88,9 @@ function sendLinePushMessage_(userId, text, accessToken, channelLabel) {
 // ==== 同一メッセージを複数の宛先へ送信する(本人+CC等)。空欄・重複userIdは自動的にスキップする ====
 // recipientsは [{userId, accessToken, channelLabel}, ...] の配列。宛先ごとに異なるチャネル(アクセストークン)を
 // 指定できる(getPersonNotifyRecipients_を参照)。
+// 宛先ごとにtry/catchで囲んでおり、1人への送信が失敗(ネットワーク例外等)しても、
+// 残りの宛先への送信は続行する(以前は1人目の例外でforEachごと止まり、
+// 残りの宛先には送信が試行すらされていなかった)。
 function sendLinePushToRecipients_(recipients, text) {
   const seen = {};
   recipients.forEach(function (recipient) {
@@ -98,7 +101,11 @@ function sendLinePushToRecipients_(recipients, text) {
       return;
     }
     seen[recipient.userId] = true;
-    sendLinePushMessage_(recipient.userId, text, recipient.accessToken, recipient.channelLabel);
+    try {
+      sendLinePushMessage_(recipient.userId, text, recipient.accessToken, recipient.channelLabel);
+    } catch (e) {
+      Logger.log((recipient.channelLabel ? '[' + recipient.channelLabel + '] ' : '') + '送信失敗: ' + e.message);
+    }
   });
 }
 

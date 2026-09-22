@@ -478,6 +478,9 @@ function buildDepartureNoticeSectionLines_(result) {
     lines.push('車送迎の担当の方に連絡リマインドしてください。');
     if (result.pop !== null) {
       lines.push('降水確率: ' + result.pop + '%');
+    } else {
+      // 項目A4と同じ表現に揃える(黙って省略しない。項目B)
+      lines.push('降水確率を取得できませんでした。');
     }
   } else {
     lines.push('予定: ' + result.label + '(' + startLabel + '〜)');
