@@ -115,6 +115,20 @@ const CONTENT_RULES_ = [
   '(1つの予定にまとめず、start_time/end_timeもそれぞれの時間帯だけにしてください)。\n' +
   '  - nameは、表の見出しに書かれている部活動名を家族プロフィールと照合して判定してください' +
   '(例: 「女子卓球部」→みつき)。',
+  '・【部活動連絡アプリのスケジュール画面について】画面上部に学校名と部活動名(例: 「豊田市前林中学校 女子卓球部」)が表示され、' +
+  '下部に「活動記録」「スケジュール」「チーム連絡」「目標管理」「メニュー」等のタブが並ぶ、' +
+  'スマホアプリのスクリーンショットの場合、これは部活動連絡アプリの画面です' +
+  '(上記の「部活動計画表」「練習予定表」とは別の書類として、以下のルールで読み取ってください)。\n' +
+  '  - 黄色いラベル「部活」(主に平日についている) → name="みつき", title="卓球部(部活)", ' +
+  'start_time="16:00", end_time="17:00"\n' +
+  '  - 黄色いラベル「午前部」(主に土日についている) → name="みつき", title="卓球部(午前部)", ' +
+  'start_time="08:00", end_time="11:00"\n' +
+  '  - 青色または紫色のラベル「新人戦」「大会」「大会決勝」「練習試合」等の大会・試合系ラベル → ' +
+  'name="みつき", title="卓球部(" + ラベルの文字 + ")"(例: "卓球部(新人戦)")、終日予定として出力する' +
+  '(start_time・end_timeは空欄にする)。\n' +
+  '  - ラベルが付いていない日は、活動が無い日なので出力しないでください。\n' +
+  '  - 上記以外の色・文言のラベルが登場した場合は、ラベルの文字をそのままtitleに含め、' +
+  '時間は不明として終日予定で出力してください。',
   '・【練習予定表(「R8 練習予定」のような日別の表形式)について】' +
   '書類の上部に「◯月の予定」という見出しと、部活動名(例: 女子バドミントン)が書かれ、' +
   '日付ごとに「区分」「場所」「学校行事」「備考」の列が並ぶ表の場合、以下のルールで読み取ってください。\n' +
@@ -314,12 +328,12 @@ function processFilesWithinTimeLimit_(config) {
     const elapsed = Date.now() - startedAt;
 
     // ① 登録待ち(ペンディング)があれば、その続きを登録
-    const pendingFiles = pendingFolder.getFilesByType(MimeType.PLAIN_TEXT);
-    if (pendingFiles.hasNext()) {
+    const pendingFile = findPendingJsonFile_(pendingFolder);
+    if (pendingFile) {
       if (elapsed > BATCH_START_LIMIT_MS_) return true;
       let progress;
       try {
-        progress = processPendingBatch_(pendingFiles.next(), config.calendarId, processedFolder);
+        progress = processPendingBatch_(pendingFile, config.calendarId, processedFolder);
       } catch (e) {
         Logger.log('登録待ち分の登録でエラー(次回の定期実行で再試行します): ' + e.message);
         return false;
@@ -340,6 +354,20 @@ function processFilesWithinTimeLimit_(config) {
     const ok = extractScheduleFile_(file, config, folder, processedFolder, pendingFolder, startedAt);
     if (!ok) failedFileIds[file.getId()] = true;
   }
+}
+
+// ==== 「作業中」フォルダから、名前が「.pending.json」で終わる登録待ちデータを1件返す(無ければ null) ====
+// (無関係なテキストファイルが紛れ込んでいても、誤って内部データとして読み込まないようにするため。9/17の不具合対応)
+function findPendingJsonFile_(pendingFolder) {
+  const pendingFilesIter = pendingFolder.getFilesByType(MimeType.PLAIN_TEXT);
+  while (pendingFilesIter.hasNext()) {
+    const candidate = pendingFilesIter.next();
+    if (candidate.getName().indexOf('.pending.json') !== -1) {
+      return candidate;
+    }
+    Logger.log('「作業中」フォルダに想定外のファイルがあります(無視します): ' + candidate.getName());
+  }
+  return null;
 }
 
 // ==== フォルダ直下の未処理ファイル(PDF・画像)を1件返す(無ければ null) ====
@@ -510,7 +538,25 @@ function runFamilyScheduleFollowup_(e) {
 
 // ==== ペンディング(登録待ち)分を最大BATCH_SIZE_件だけ登録し、残りを保存 ====
 function processPendingBatch_(pendingFile, calendarId, processedFolder) {
-  const data = JSON.parse(pendingFile.getBlob().getDataAsString('UTF-8'));
+  let data;
+  try {
+    data = JSON.parse(pendingFile.getBlob().getDataAsString('UTF-8'));
+  } catch (e) {
+    // 中身が壊れている(JSONとして読めない)場合は、その後の全トリガーを巻き込んで
+    // 止まり続けることのないよう、このファイルだけを隔離して処理を終える
+    Logger.log(
+      '「作業中」フォルダのファイルが壊れているため隔離します: ' + pendingFile.getName() +
+      ' / ' + e.message
+    );
+    try {
+      pendingFile.setName('(破損)' + pendingFile.getName());
+      pendingFile.moveTo(processedFolder);
+    } catch (e2) {
+      Logger.log('壊れたファイルの隔離にも失敗しました: ' + e2.message);
+    }
+    // 隔離済み。登録の進み具合としては「残り0件」を返し、呼び出し元の連続処理は次へ進める
+    return { successCount: 0, remainingCount: 0, quarantined: true };
+  }
   const remaining = data.remainingEvents;
 
   const batch = remaining.slice(0, BATCH_SIZE_);
@@ -1282,14 +1328,30 @@ function performSelfCheck_(file, apiKey, registeredLines) {
   };
 
   try {
-    const response = UrlFetchApp.fetch(url, {
-      method: 'post',
-      contentType: 'application/json',
-      payload: JSON.stringify(payload),
-      muteHttpExceptions: true,
-    });
-    if (response.getResponseCode() !== 200) {
-      return '(セルフチェックに失敗しました: ' + response.getResponseCode() + ')';
+    // 一時的なサーバー混雑(503)やレート超過(429)は、間隔を空けて最大3回リトライする
+    const maxRetries = 3;
+    let response;
+    let responseCode;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      response = UrlFetchApp.fetch(url, {
+        method: 'post',
+        contentType: 'application/json',
+        payload: JSON.stringify(payload),
+        muteHttpExceptions: true,
+      });
+      responseCode = response.getResponseCode();
+
+      if (responseCode === 200) break;
+
+      if ((responseCode === 503 || responseCode === 429) && attempt < maxRetries) {
+        Logger.log('セルフチェック: Gemini APIが一時的に混雑(' + responseCode + ')。' + attempt * 10 + '秒待って再試行します。');
+        Utilities.sleep(attempt * 10 * 1000);
+      } else {
+        break;
+      }
+    }
+    if (responseCode !== 200) {
+      return '(セルフチェックに失敗しました: ' + responseCode + ')';
     }
     const json = JSON.parse(response.getContentText());
     return json.candidates[0].content.parts[0].text.trim();
