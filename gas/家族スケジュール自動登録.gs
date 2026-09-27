@@ -425,13 +425,40 @@ function extractScheduleFile_(file, config, folder, processedFolder, pendingFold
       writeProcessLog_(folder, file.getName(), [], null);
       file.moveTo(processedFolder);
     }
+    clearGeminiBusyRetryCount_(file.getId());
     return true;
   } catch (e) {
     Logger.log('エラー(' + file.getName() + '): ' + e.message);
     writeProcessLog_(folder, file.getName(), [], e.message);
-    // エラーが出たファイルは残しておき、次回の定期実行でまた処理対象にする
+    // エラーが出たファイルは残しておき、次回の定期実行でまた処理対象にする。
+    // Geminiの一時的な混雑(503/429)が原因の場合は、15分おきの定期実行を待たずに5分後の再試行も予約する
+    if (/Gemini APIエラー\((503|429)\)/.test(e.message)) {
+      scheduleGeminiBusyRetry_(file);
+    }
     return false;
   }
+}
+
+// ==== Geminiの一時的な混雑で失敗したファイルを、5分後に再試行する(1ファイルにつき最大3回) ====
+// 3回を超えた後は、従来どおり15分おきの定期実行での再試行に任せる(再試行の連発を防ぐため)。
+const GEMINI_BUSY_RETRY_PROP_PREFIX_ = 'FAMILY_SCHEDULE_BUSY_RETRY_';
+const GEMINI_BUSY_RETRY_MAX_ = 3;
+const GEMINI_BUSY_RETRY_DELAY_MS_ = 5 * 60 * 1000;
+
+function scheduleGeminiBusyRetry_(file) {
+  const props = PropertiesService.getScriptProperties();
+  const key = GEMINI_BUSY_RETRY_PROP_PREFIX_ + file.getId();
+  const count = Number(props.getProperty(key) || 0) + 1;
+  props.setProperty(key, String(count));
+  if (count > GEMINI_BUSY_RETRY_MAX_) {
+    Logger.log('Gemini混雑による失敗が' + count + '回目のため、早めの再試行は行わず15分おきの定期実行に任せます: ' + file.getName());
+    return;
+  }
+  requestFamilyScheduleRunSoon_('Gemini混雑のため再試行(' + count + '/' + GEMINI_BUSY_RETRY_MAX_ + '回目)', GEMINI_BUSY_RETRY_DELAY_MS_);
+}
+
+function clearGeminiBusyRetryCount_(fileId) {
+  PropertiesService.getScriptProperties().deleteProperty(GEMINI_BUSY_RETRY_PROP_PREFIX_ + fileId);
 }
 
 // ==== アップロード者(誰の分か)を判定する ====
@@ -510,17 +537,19 @@ function releaseFamilyScheduleLease_() {
 const FAMILY_SCHEDULE_FOLLOWUP_PROP_ = 'FAMILY_SCHEDULE_FOLLOWUP_AT';
 const FAMILY_SCHEDULE_FOLLOWUP_DELAY_MS_ = 60 * 1000;
 
-function requestFamilyScheduleRunSoon_(reason) {
+// delayMs を省略した場合は約1分後(FAMILY_SCHEDULE_FOLLOWUP_DELAY_MS_)。
+function requestFamilyScheduleRunSoon_(reason, delayMs) {
+  const delay = delayMs || FAMILY_SCHEDULE_FOLLOWUP_DELAY_MS_;
   const props = PropertiesService.getScriptProperties();
   const scheduledAt = Number(props.getProperty(FAMILY_SCHEDULE_FOLLOWUP_PROP_) || 0);
-  // 予約済み(かつ5分以上前の古い目印ではない)なら、新たに予約しない
+  // 予約済み(かつ予定時刻から5分以上過ぎた古い目印ではない)なら、新たに予約しない
   if (scheduledAt && scheduledAt > Date.now() - 5 * 60 * 1000) {
     Logger.log('取り込み実行はすでに予約済みです(' + reason + ')。');
     return;
   }
-  props.setProperty(FAMILY_SCHEDULE_FOLLOWUP_PROP_, String(Date.now() + FAMILY_SCHEDULE_FOLLOWUP_DELAY_MS_));
-  ScriptApp.newTrigger('runFamilyScheduleFollowup_').timeBased().after(FAMILY_SCHEDULE_FOLLOWUP_DELAY_MS_).create();
-  Logger.log('約1分後に取り込み処理を予約しました(' + reason + ')。');
+  props.setProperty(FAMILY_SCHEDULE_FOLLOWUP_PROP_, String(Date.now() + delay));
+  ScriptApp.newTrigger('runFamilyScheduleFollowup_').timeBased().after(delay).create();
+  Logger.log('約' + Math.round(delay / 60000) + '分後に取り込み処理を予約しました(' + reason + ')。');
 }
 
 // ==== requestFamilyScheduleRunSoon_ が作った使い捨てトリガーから呼ばれる ====
@@ -561,7 +590,9 @@ function processPendingBatch_(pendingFile, calendarId, processedFolder) {
 
   const batch = remaining.slice(0, BATCH_SIZE_);
 
-  const successCount = registerEvents_(batch, calendarId, data.sourceFileName);
+  // 既存の予定と同じためスキップした分は、セルフチェックとメールで「見落とし」と誤解されないよう記録して引き継ぐ
+  const skippedDuplicates = (data.skippedDuplicates || []).slice();
+  const successCount = registerEvents_(batch, calendarId, data.sourceFileName, skippedDuplicates);
   // 実際に成功した件数分だけ「登録済み」として切り離す(途中でエラーが出ても重複しないように)
   const rest = remaining.slice(successCount);
 
@@ -586,7 +617,7 @@ function processPendingBatch_(pendingFile, calendarId, processedFolder) {
     // 合計実行時間が6分の上限を超えてスクリプトごと強制終了する恐れがあるため、
     // 別トリガーの新しい実行(新しい6分の持ち時間)に切り出す
     try {
-      scheduleNotification_(data.sourceFileId, data.sourceFileName, data.uploaderEmail);
+      scheduleNotification_(data.sourceFileId, data.sourceFileName, data.uploaderEmail, skippedDuplicates);
     } catch (e) {
       Logger.log('通知メールの予約でエラー(処理自体は完了しています): ' + e.message);
     }
@@ -598,6 +629,7 @@ function processPendingBatch_(pendingFile, calendarId, processedFolder) {
         sourceFileName: data.sourceFileName,
         remainingEvents: rest,
         uploaderEmail: data.uploaderEmail,
+        skippedDuplicates: skippedDuplicates,
       })
     );
   }
@@ -606,11 +638,16 @@ function processPendingBatch_(pendingFile, calendarId, processedFolder) {
 
 // ==== セルフチェック+通知メール送信を、少し後に別実行で行うよう予約する ====
 // (抽出・登録と同じ実行内で行うと6分の実行時間上限に達する恐れがあるため分離)
-function scheduleNotification_(fileId, fileName, uploaderEmail) {
+function scheduleNotification_(fileId, fileName, uploaderEmail, skippedDuplicates) {
   const props = PropertiesService.getScriptProperties();
   props.setProperty(
     'PENDING_NOTIFY_' + fileId,
-    JSON.stringify({ fileId: fileId, fileName: fileName, uploaderEmail: uploaderEmail })
+    JSON.stringify({
+      fileId: fileId,
+      fileName: fileName,
+      uploaderEmail: uploaderEmail,
+      skippedDuplicates: skippedDuplicates || [],
+    })
   );
   // 10秒後に一度だけ実行されるトリガーを作成(新しい実行=新しい6分の持ち時間になる)
   ScriptApp.newTrigger('runScheduledNotifications_').timeBased().after(10 * 1000).create();
@@ -646,11 +683,12 @@ function runScheduledNotifications_(e) {
         sourceFile = null; // 処理済みフォルダへの移動後でも取得自体は可能なはずだが念のため
       }
       const registeredLines = previewBySourceFile_(data.fileName, config.calendarId);
+      const skippedLines = data.skippedDuplicates || [];
       let checkReport = '(セルフチェックは実行されませんでした)';
       if (sourceFile && config.apiKey) {
-        checkReport = performSelfCheck_(sourceFile, config.apiKey, registeredLines);
+        checkReport = performSelfCheck_(sourceFile, config.apiKey, registeredLines, skippedLines);
       }
-      sendNotificationEmail_(config, data.fileName, registeredLines.length, checkReport, data.uploaderEmail);
+      sendNotificationEmail_(config, data.fileName, registeredLines.length, checkReport, data.uploaderEmail, skippedLines);
     } catch (err) {
       Logger.log('遅延通知の処理でエラー: ' + err.message + ' (対象: ' + data.fileName + ')');
     }
@@ -1015,7 +1053,8 @@ function resolveHolidayChecks_(rawEvents) {
 }
 
 // ==== 抽出したJSONをGoogleカレンダーに登録 ====
-function registerEvents_(events, calendarId, sourceLabel) {
+// skippedLinesOut(省略可)を渡すと、既存の予定と同じためスキップした予定を「日付 / 予定名」の形で追加する
+function registerEvents_(events, calendarId, sourceLabel, skippedLinesOut) {
   const calendar = CalendarApp.getCalendarById(calendarId);
   if (!calendar) {
     throw new Error('カレンダーが見つかりません。CALENDAR_IDを確認してください。');
@@ -1043,6 +1082,9 @@ function registerEvents_(events, calendarId, sourceLabel) {
         return e.getTitle() === eventTitle;
       });
       if (alreadyExists) {
+        if (skippedLinesOut) {
+          skippedLinesOut.push(ev.date + ' / ' + eventTitle + (ev.start_time ? '(' + ev.start_time + ')' : ''));
+        }
         successCount++;
         continue;
       }
@@ -1303,7 +1345,7 @@ function previewOtherGradeCandidates() {
 
 // ==== 特定の取込元(ファイル名)に該当する予定を検索し、一覧(HTML用)を返す(削除はしない) ====
 // ==== Geminiにもう一度、書類と登録結果を照合させて簡易チェックレポートを作る ====
-function performSelfCheck_(file, apiKey, registeredLines) {
+function performSelfCheck_(file, apiKey, registeredLines, skippedLines) {
   const model = 'gemini-3.5-flash-lite';
   const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + model +
     ':generateContent?key=' + apiKey;
@@ -1313,11 +1355,16 @@ function performSelfCheck_(file, apiKey, registeredLines) {
   const mimeType = blob.getContentType();
 
   const registeredText = registeredLines.length > 0 ? registeredLines.join('\n') : '(登録された予定はありません)';
+  const skipped = skippedLines || [];
+  const skippedText = skipped.length > 0
+    ? '\n\n【カレンダーに同じ予定が既にあったため、今回は登録をスキップした予定(これらは見落としではありません)】\n' +
+      skipped.join('\n')
+    : '';
 
   const prompt =
     'あなたはこの書類の内容と、すでに抽出・登録された以下の予定一覧を照合してください。\n\n' +
-    '【登録済みの予定一覧】\n' + registeredText + '\n\n' +
-    '書類に実際に書かれているのに一覧に無い予定(見落とし)、' +
+    '【登録済みの予定一覧】\n' + registeredText + skippedText + '\n\n' +
+    '書類に実際に書かれているのに、上記のどちらの一覧にも無い予定(見落とし)、' +
     'または一覧にあるのに書類のどこにも書かれていない予定(誤り)が無いか確認し、' +
     '問題点だけを簡潔に箇条書きで報告してください。' +
     '問題が見当たらない場合は「問題は見つかりませんでした」とだけ書いてください。' +
@@ -1377,7 +1424,8 @@ function dedupeEmails_(emails) {
 // ==== 取り込み完了の通知メールを送信(セルフチェック結果+確認/削除ボタン付き) ====
 // ・登録内容の「確認」は、アップロード本人+一志+きくみの3人が可能
 // ・登録内容の「削除」は、アップロード本人+一志の2人のみ可能(削除ボタンはこの2人にしか送らない)
-function sendNotificationEmail_(config, fileName, registeredCount, checkReport, uploaderEmail) {
+function sendNotificationEmail_(config, fileName, registeredCount, checkReport, uploaderEmail, skippedLines) {
+  const skipped = skippedLines || [];
   let webAppUrl = config.webAppUrl || null; // 手動設定を優先
   if (!webAppUrl) {
     try {
@@ -1394,7 +1442,15 @@ function sendNotificationEmail_(config, fileName, registeredCount, checkReport, 
   });
 
   const escapedReport = checkReport.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const subject = '【家族スケジュール自動登録】' + fileName + ' を取り込みました(' + registeredCount + '件)';
+  const subject = '【家族スケジュール自動登録】' + fileName + ' を取り込みました(' + registeredCount + '件' +
+    (skipped.length > 0 ? '、既存と同じ' + skipped.length + '件はスキップ' : '') + ')';
+  const escapeHtml = function (text) {
+    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  };
+  const skippedHtml = skipped.length > 0
+    ? '<p>次の ' + skipped.length + ' 件は、カレンダーに同じ予定が既にあったため登録をスキップしました(見落としではありません)。</p><ul>' +
+      skipped.map(function (l) { return '<li>' + escapeHtml(l) + '</li>'; }).join('') + '</ul>'
+    : '';
 
   function buildHtmlBody_(includeDeleteButton) {
     let buttonsHtml = '';
@@ -1417,6 +1473,7 @@ function sendNotificationEmail_(config, fileName, registeredCount, checkReport, 
 
     return (
       '<p>「' + fileName + '」から ' + registeredCount + ' 件の予定を登録しました。</p>' +
+      skippedHtml +
       '<p><b>AIによるセルフチェック結果:</b></p>' +
       '<pre style="white-space:pre-wrap;font-family:inherit;background:#f5f5f5;padding:10px;border-radius:4px;">' +
       escapedReport + '</pre>' +
