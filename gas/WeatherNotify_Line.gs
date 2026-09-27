@@ -34,7 +34,6 @@
  */
 
 const LINE_PUSH_URL_ = 'https://api.line.me/v2/bot/message/push';
-const LINE_REPLY_URL_ = 'https://api.line.me/v2/bot/message/reply';
 
 /**
  * 河川水位情報リンクを末尾に付与する共通関数(項目A1)。
@@ -125,25 +124,6 @@ function getPersonNotifyRecipients_(config, personKey) {
   ];
 }
 
-// ==== LINEへreplyメッセージを送信(Webhookのイベントに対する即時応答) ====
-// accessTokenを省略した場合は、検証・デバッグ用チャネル(LINE_CHANNEL_ACCESS_TOKEN)を使う。
-function replyLineMessage_(replyToken, text, accessToken) {
-  const config = getWeatherConfig_();
-  const token = accessToken || config.lineChannelAccessToken;
-  if (!token) return;
-  const payload = {
-    replyToken: replyToken,
-    messages: [{ type: 'text', text: text }],
-  };
-  UrlFetchApp.fetch(LINE_REPLY_URL_, {
-    method: 'post',
-    contentType: 'application/json',
-    headers: { Authorization: 'Bearer ' + token },
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true,
-  });
-}
-
 // (Webhookを受け付けるチャネルの一覧 LINE_CHANNELS_ と resolveLineChannel_ は LineRouter.gs に移設)
 
 /**
@@ -200,7 +180,7 @@ LINE_FEATURE_HANDLERS_.push({
     const isTarget = event.type === 'follow' ||
       (event.type === 'message' && event.message && event.message.type === 'text');
     if (!isTarget) return false;
-    handleLineWebhookEvent_(event, ctx.props, ctx.accessToken);
+    handleLineWebhookEvent_(ctx);
     return true;
   },
 });
@@ -213,15 +193,12 @@ const LINE_REGISTRATION_KEYWORDS_ = {
   'きくみ': { prop: 'LINE_USER_ID_KIKUMI', replyText: 'きくみさんとして登録しました。今後、ゆうきさん・みつきさん向け通知のCCをお届けします。' },
 };
 
-function handleLineWebhookEvent_(event, props, channelAccessToken) {
+function handleLineWebhookEvent_(ctx) {
+  const event = ctx.event;
   const userId = event.source && event.source.userId;
 
   if (event.type === 'follow') {
-    if (event.replyToken) {
-      replyLineMessage_(event.replyToken,
-        'お友だち追加ありがとうございます。\n「ゆうき」「みつき」「一志」「きくみ」のいずれかをメッセージで送って、通知の登録をしてください。',
-        channelAccessToken);
-    }
+    ctx.reply('お友だち追加ありがとうございます。\n「ゆうき」「みつき」「一志」「きくみ」のいずれかをメッセージで送って、通知の登録をしてください。');
     return;
   }
 
@@ -229,13 +206,11 @@ function handleLineWebhookEvent_(event, props, channelAccessToken) {
     const text = event.message.text.trim();
     const target = LINE_REGISTRATION_KEYWORDS_[text];
     if (target) {
-      props.setProperty(target.prop, userId);
+      ctx.props.setProperty(target.prop, userId);
       Logger.log(target.prop + 'を登録しました: ' + userId);
-      if (event.replyToken) {
-        replyLineMessage_(event.replyToken, target.replyText, channelAccessToken);
-      }
-    } else if (event.replyToken) {
-      replyLineMessage_(event.replyToken, '「ゆうき」「みつき」「一志」「きくみ」のいずれかを送信すると通知の登録ができます。', channelAccessToken);
+      ctx.reply(target.replyText);
+    } else {
+      ctx.reply('「ゆうき」「みつき」「一志」「きくみ」のいずれかを送信すると通知の登録ができます。');
     }
   }
 }
