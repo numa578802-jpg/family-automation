@@ -264,7 +264,16 @@ function setupTrigger() {
 // ==== 1回の実行で登録する予定の最大件数(タイムアウト防止) ====
 const BATCH_SIZE_ = 80;
 
-// ==== メイン処理:未完了の登録があれば続きから、なければ新規ファイルを1件処理 ====
+// ==== 1回の実行の中で、時間の許す限り続けて処理するための目安(GASの実行上限は6分) ====
+// ・新しいファイルの抽出(Gemini解析)を始めてよいのは、実行開始からこの時間まで
+//   (Geminiの混雑時は自動リトライで最大2分程度かかるため、余裕を持たせている)
+const NEW_FILE_START_LIMIT_MS_ = 120 * 1000;
+// ・登録待ち(ペンディング)の次の80件の登録を始めてよいのは、実行開始からこの時間まで
+const BATCH_START_LIMIT_MS_ = 210 * 1000;
+
+// ==== メイン処理:登録待ちの続き → 新規ファイル の順に、時間の許す限り続けて処理する ====
+// 15分おきの定期トリガーのほか、LINEで受信した直後や、処理しきれなかったときの
+// 「1分後の続き実行」(runFamilyScheduleFollowup_)からも呼ばれる。
 function checkNewFiles() {
   const config = getConfig_();
   if (!config.apiKey || !config.folderId || !config.calendarId) {
@@ -272,77 +281,231 @@ function checkNewFiles() {
     return;
   }
 
-  const folder = DriveApp.getFolderById(config.folderId);
-  const processedFolder = getOrCreateProcessedFolder_(folder);
-  const pendingFolder = getOrCreatePendingFolder_(folder);
-
-  // ① 未完了(前回タイムアウト等で途中までしか登録できていない)ペンディングがあれば、続きから登録
-  const pendingFiles = pendingFolder.getFilesByType(MimeType.PLAIN_TEXT);
-  if (pendingFiles.hasNext()) {
-    const pendingFile = pendingFiles.next();
-    processPendingBatch_(pendingFile, config.calendarId, processedFolder);
+  // 同時に2つの取り込み処理が動かないようにする(定期実行と続き実行が重なった場合など)
+  // (取り込めなかった場合も、ファイルはフォルダに残ったままなので消えることはなく、1分後に再試行する)
+  const lease = acquireFamilyScheduleLease_();
+  if (lease !== 'acquired') {
+    Logger.log(lease === 'lock_timeout'
+      ? '排他ロックを30秒待っても取得できなかった(天気配信の処理と重なった可能性)ため、1分後に再試行します。'
+      : '別の取り込み処理が実行中のため、1分後に再試行します。');
+    requestFamilyScheduleRunSoon_(lease === 'lock_timeout' ? 'ロック取得待ちのタイムアウト' : '実行中の処理と重なったため');
     return;
   }
 
-  // ② ペンディングが無ければ、新規ファイルを1件だけ抽出してペンディング化
+  try {
+    const hasMoreWork = processFilesWithinTimeLimit_(config);
+    if (hasMoreWork) {
+      requestFamilyScheduleRunSoon_('時間内に処理しきれなかった分の続き');
+    }
+  } finally {
+    releaseFamilyScheduleLease_();
+  }
+}
+
+// ==== 時間の許す限りファイルを処理する。続きが残っていれば true を返す ====
+function processFilesWithinTimeLimit_(config) {
+  const startedAt = Date.now();
+  const folder = DriveApp.getFolderById(config.folderId);
+  const processedFolder = getOrCreateProcessedFolder_(folder);
+  const pendingFolder = getOrCreatePendingFolder_(folder);
+  const failedFileIds = {}; // この実行中にエラーになったファイル(同じ実行内で何度も再試行しない)
+
+  while (true) {
+    const elapsed = Date.now() - startedAt;
+
+    // ① 登録待ち(ペンディング)があれば、その続きを登録
+    const pendingFiles = pendingFolder.getFilesByType(MimeType.PLAIN_TEXT);
+    if (pendingFiles.hasNext()) {
+      if (elapsed > BATCH_START_LIMIT_MS_) return true;
+      let progress;
+      try {
+        progress = processPendingBatch_(pendingFiles.next(), config.calendarId, processedFolder);
+      } catch (e) {
+        Logger.log('登録待ち分の登録でエラー(次回の定期実行で再試行します): ' + e.message);
+        return false;
+      }
+      if (progress.successCount === 0 && progress.remainingCount > 0) {
+        // 1件も登録できない(カレンダーの1日の上限など)。続き実行を連発せず、次回の定期実行に任せる
+        Logger.log('登録が1件も進まなかったため、続きは次回の定期実行に任せます。');
+        return false;
+      }
+      continue;
+    }
+
+    // ② 登録待ちが無ければ、未処理の新規ファイルを1件抽出
+    const file = findNextScheduleFile_(folder, failedFileIds);
+    if (!file) return false; // すべて処理しきった
+    if (elapsed > NEW_FILE_START_LIMIT_MS_) return true;
+
+    const ok = extractScheduleFile_(file, config, folder, processedFolder, pendingFolder, startedAt);
+    if (!ok) failedFileIds[file.getId()] = true;
+  }
+}
+
+// ==== フォルダ直下の未処理ファイル(PDF・画像)を1件返す(無ければ null) ====
+function findNextScheduleFile_(folder, failedFileIds) {
   const files = folder.getFiles();
   while (files.hasNext()) {
     const file = files.next();
     const mime = file.getMimeType();
+    if (mime !== MimeType.PDF && mime.indexOf('image/') !== 0) continue;
+    if (failedFileIds[file.getId()]) continue;
+    return file;
+  }
+  return null;
+}
 
-    // PDFまたは画像ファイルのみ処理対象
-    if (mime !== MimeType.PDF && mime.indexOf('image/') !== 0) {
-      continue;
+// ==== 1ファイルを抽出して登録待ち(ペンディング)にする。成功で true、エラーで false ====
+function extractScheduleFile_(file, config, folder, processedFolder, pendingFolder, startedAt) {
+  try {
+    Logger.log('処理開始: ' + file.getName());
+    const uploader = resolveUploader_(file, config);
+    if (uploader.name) {
+      Logger.log('アップロード者ヒント: ' + uploader.name + (uploader.viaLine ? '(LINE経由)' : ''));
     }
-
-    try {
-      Logger.log('処理開始: ' + file.getName());
-      const uploaderHint = guessUploaderName_(file, config.familyEmailMap);
-      if (uploaderHint) {
-        Logger.log('アップロード者ヒント: ' + uploaderHint);
-      }
-      const uploaderEmail = getUploaderEmail_(file);
-      if (uploaderEmail) {
-        Logger.log('アップロード者のメールアドレス: ' + uploaderEmail);
-      }
-      const rawExtractedEvents = callGeminiApi_(file, config.apiKey, uploaderHint);
-      const forcedName = guessForcedNameFromFilename_(file.getName(), config.familyFilenameMap);
-      if (forcedName) {
-        Logger.log('ファイル名から強制的に名前を確定: ' + forcedName);
-      }
-      const forcedEvents = applyForcedName_(rawExtractedEvents, forcedName);
-      const events = mergeConsecutiveSameTitleEvents_(forcedEvents);
-      if (events && events.length > 0) {
-        Logger.log(
-          rawExtractedEvents.length + '件を抽出し、連続日をまとめて' + events.length + '件にしました。登録を開始します: ' + file.getName()
-        );
-        const pendingData = {
-          sourceFileId: file.getId(),
-          sourceFileName: file.getName(),
-          remainingEvents: events,
-          uploaderEmail: uploaderEmail,
-        };
-        const pendingFile = pendingFolder.createFile(
-          file.getName() + '.pending.json',
-          JSON.stringify(pendingData),
-          MimeType.PLAIN_TEXT
-        );
-        // 抽出できたその場で1バッチ目を登録開始(残りは次回以降のトリガーへ)
+    if (uploader.email) {
+      Logger.log('アップロード者のメールアドレス: ' + uploader.email);
+    }
+    const rawExtractedEvents = callGeminiApi_(file, config.apiKey, uploader.name);
+    const forcedName = guessForcedNameFromFilename_(file.getName(), config.familyFilenameMap);
+    if (forcedName) {
+      Logger.log('ファイル名から強制的に名前を確定: ' + forcedName);
+    }
+    const forcedEvents = applyForcedName_(rawExtractedEvents, forcedName);
+    const events = mergeConsecutiveSameTitleEvents_(forcedEvents);
+    if (events && events.length > 0) {
+      Logger.log(
+        rawExtractedEvents.length + '件を抽出し、連続日をまとめて' + events.length + '件にしました。登録を開始します: ' + file.getName()
+      );
+      const pendingData = {
+        sourceFileId: file.getId(),
+        sourceFileName: file.getName(),
+        remainingEvents: events,
+        uploaderEmail: uploader.email,
+      };
+      const pendingFile = pendingFolder.createFile(
+        file.getName() + '.pending.json',
+        JSON.stringify(pendingData),
+        MimeType.PLAIN_TEXT
+      );
+      // 時間に余裕があれば、抽出できたその場で1バッチ目を登録(無ければ次のループ/続き実行で登録)
+      if (Date.now() - startedAt <= BATCH_START_LIMIT_MS_) {
         processPendingBatch_(pendingFile, config.calendarId, processedFolder);
-      } else {
-        Logger.log('予定を抽出できませんでした: ' + file.getName());
-        writeProcessLog_(folder, file.getName(), [], null);
-        file.moveTo(processedFolder);
       }
-    } catch (e) {
-      Logger.log('エラー(' + file.getName() + '): ' + e.message);
-      writeProcessLog_(folder, file.getName(), [], e.message);
-      // エラーが出たファイルは残しておき、次回また処理対象にする
+    } else {
+      Logger.log('予定を抽出できませんでした: ' + file.getName());
+      writeProcessLog_(folder, file.getName(), [], null);
+      file.moveTo(processedFolder);
     }
+    return true;
+  } catch (e) {
+    Logger.log('エラー(' + file.getName() + '): ' + e.message);
+    writeProcessLog_(folder, file.getName(), [], e.message);
+    // エラーが出たファイルは残しておき、次回の定期実行でまた処理対象にする
+    return false;
+  }
+}
 
-    // 1ファイル処理したらここで終了(複数ファイルをまとめて処理してタイムアウトするのを防ぐため)
+// ==== アップロード者(誰の分か)を判定する ====
+// LINE経由で保存されたファイルは、説明欄の「line_uploader=◯◯」(受信したチャネルの持ち主)を優先する。
+// それ以外(Driveへの直接アップロード)は従来どおりDriveのオーナーで判定する。
+function resolveUploader_(file, config) {
+  let description = '';
+  try {
+    description = file.getDescription() || '';
+  } catch (e) {
+    description = '';
+  }
+  const match = /(?:^|\n)line_uploader=([^\n]+)/.exec(description);
+  if (match) {
+    const name = match[1].trim();
+    return { name: name, email: emailForFamilyName_(name, config), viaLine: true };
+  }
+  return {
+    name: guessUploaderName_(file, config.familyEmailMap),
+    email: getUploaderEmail_(file),
+    viaLine: false,
+  };
+}
+
+// ==== 家族の名前 → メールアドレス(FAMILY_EMAIL_MAP の「メール:名前」を逆引き) ====
+function emailForFamilyName_(name, config) {
+  const pairs = (config.familyEmailMap || '').split(',');
+  for (let i = 0; i < pairs.length; i++) {
+    const parts = pairs[i].split(':');
+    if (parts.length === 2 && parts[1].trim() === name) {
+      return parts[0].trim();
+    }
+  }
+  if (name === '一志') return config.notifyEmail || '';
+  if (name === 'きくみ') return config.kikumiEmail || '';
+  Logger.log('FAMILY_EMAIL_MAPに「' + name + '」のメールアドレスが見つかりません(通知は一志・きくみのみに届きます)。');
+  return '';
+}
+
+// ==== 取り込み処理の「実行中」目印(リース) ====
+// LockService(スクリプトロック)はプロジェクト全体で1つしかなく、天気配信の2重送信対策が使っているため、
+// 取り込み処理(最大数分)の間ずっと握り続けると天気配信の通知が見送られてしまう。
+// そこで、ロックは「目印の確認・書き込み」の一瞬だけ使い、実行中かどうかはスクリプトプロパティの
+// 有効期限付きの目印で管理する(万一実行が強制終了しても、期限が過ぎれば自動的に無効になる)。
+const FAMILY_SCHEDULE_LEASE_PROP_ = 'FAMILY_SCHEDULE_RUNNING_UNTIL';
+const FAMILY_SCHEDULE_LEASE_MS_ = 7 * 60 * 1000; // GASの実行上限(6分)より少し長く
+
+// 戻り値: 'acquired'(取得できた) / 'busy'(別の取り込み処理が実行中) / 'lock_timeout'(ロック待ちで時間切れ)
+function acquireFamilyScheduleLease_() {
+  const lock = LockService.getScriptLock();
+  let locked = false;
+  try {
+    locked = lock.tryLock(30 * 1000);
+  } catch (e) {
+    locked = false;
+  }
+  if (!locked) return 'lock_timeout';
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const runningUntil = Number(props.getProperty(FAMILY_SCHEDULE_LEASE_PROP_) || 0);
+    if (runningUntil > Date.now()) return 'busy';
+    props.setProperty(FAMILY_SCHEDULE_LEASE_PROP_, String(Date.now() + FAMILY_SCHEDULE_LEASE_MS_));
+    return 'acquired';
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function releaseFamilyScheduleLease_() {
+  PropertiesService.getScriptProperties().deleteProperty(FAMILY_SCHEDULE_LEASE_PROP_);
+}
+
+// ==== 約1分後に取り込み処理を1回実行するよう予約する(すでに予約済みなら何もしない) ====
+// LINEで受信した直後と、時間内に処理しきれなかったときに使う。予約は常に1つまでにして、
+// トリガーの作りすぎ(GASの上限は1プロジェクト20個)を防ぐ。
+const FAMILY_SCHEDULE_FOLLOWUP_PROP_ = 'FAMILY_SCHEDULE_FOLLOWUP_AT';
+const FAMILY_SCHEDULE_FOLLOWUP_DELAY_MS_ = 60 * 1000;
+
+function requestFamilyScheduleRunSoon_(reason) {
+  const props = PropertiesService.getScriptProperties();
+  const scheduledAt = Number(props.getProperty(FAMILY_SCHEDULE_FOLLOWUP_PROP_) || 0);
+  // 予約済み(かつ5分以上前の古い目印ではない)なら、新たに予約しない
+  if (scheduledAt && scheduledAt > Date.now() - 5 * 60 * 1000) {
+    Logger.log('取り込み実行はすでに予約済みです(' + reason + ')。');
     return;
   }
+  props.setProperty(FAMILY_SCHEDULE_FOLLOWUP_PROP_, String(Date.now() + FAMILY_SCHEDULE_FOLLOWUP_DELAY_MS_));
+  ScriptApp.newTrigger('runFamilyScheduleFollowup_').timeBased().after(FAMILY_SCHEDULE_FOLLOWUP_DELAY_MS_).create();
+  Logger.log('約1分後に取り込み処理を予約しました(' + reason + ')。');
+}
+
+// ==== requestFamilyScheduleRunSoon_ が作った使い捨てトリガーから呼ばれる ====
+function runFamilyScheduleFollowup_(e) {
+  if (e && e.triggerUid) {
+    ScriptApp.getProjectTriggers().forEach(function (trigger) {
+      if (trigger.getUniqueId() === e.triggerUid) {
+        ScriptApp.deleteTrigger(trigger);
+      }
+    });
+  }
+  PropertiesService.getScriptProperties().deleteProperty(FAMILY_SCHEDULE_FOLLOWUP_PROP_);
+  checkNewFiles();
 }
 
 // ==== ペンディング(登録待ち)分を最大BATCH_SIZE_件だけ登録し、残りを保存 ====
@@ -392,6 +555,7 @@ function processPendingBatch_(pendingFile, calendarId, processedFolder) {
       })
     );
   }
+  return { successCount: successCount, remainingCount: rest.length };
 }
 
 // ==== セルフチェック+通知メール送信を、少し後に別実行で行うよう予約する ====

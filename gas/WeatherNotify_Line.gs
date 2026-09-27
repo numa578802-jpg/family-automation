@@ -2,8 +2,11 @@
  * LINE Messaging API 送受信ラッパー
  * ------------------------------------------------------------
  * ・push送信: sendLinePushMessage_() … 天気×カレンダー通知の配信に使用
- * ・doPost(e): LINEのWebhookを受信し、「ゆうき」「みつき」「一志」「きくみ」というテキストを送った人の
+ * ・友だち登録ハンドラ: LINEのWebhookで「ゆうき」「みつき」「一志」「きくみ」というテキストを送った人の
  *   userIdをスクリプトプロパティに自動登録する(友だち追加後の最初のステップ)。
+ *   ※ Webhookの受付(doPost)とチャネル判定(LINE_CHANNELS_ / resolveLineChannel_)は LineRouter.gs に移設した。
+ *     このファイルに doPost を書いてはいけない(プロジェクト内で doPost は1つだけ。LineRouter.gs 冒頭の説明を参照)。
+ *     このファイルの受け取り処理は、ファイル末尾で LINE_FEATURE_HANDLERS_ に登録している。
  *
  * ■ チャネル構成(月200通の無料メッセージ枠がLINEのチャネル単位で管理されるための分割)
  *   同一プロバイダー「崎家エージェント」配下に、配信先ごとの専用チャネルを用意している。
@@ -141,30 +144,7 @@ function replyLineMessage_(replyToken, text, accessToken) {
   });
 }
 
-// ==== Webhookを受け付けるチャネルの一覧(検証用チャネル+配信先ごとの専用チャネル) ====
-const LINE_CHANNELS_ = [
-  { key: 'DEFAULT', label: '崎家エージェント(検証・デバッグ用)', webhookTokenProp: 'LINE_WEBHOOK_TOKEN', accessTokenProp: 'LINE_CHANNEL_ACCESS_TOKEN' },
-  { key: 'YUKI', label: '崎家エージェント＠ゆうき用', webhookTokenProp: 'LINE_WEBHOOK_TOKEN_YUKI', accessTokenProp: 'LINE_CHANNEL_ACCESS_TOKEN_YUKI' },
-  { key: 'MITSUKI', label: '崎家エージェント＠みつき用', webhookTokenProp: 'LINE_WEBHOOK_TOKEN_MITSUKI', accessTokenProp: 'LINE_CHANNEL_ACCESS_TOKEN_MITSUKI' },
-  { key: 'KAZUSHI', label: '崎家エージェント＠一志用', webhookTokenProp: 'LINE_WEBHOOK_TOKEN_KAZUSHI', accessTokenProp: 'LINE_CHANNEL_ACCESS_TOKEN_KAZUSHI' },
-  { key: 'KIKUMI', label: '崎家エージェント＠きくみ用', webhookTokenProp: 'LINE_WEBHOOK_TOKEN_KIKUMI', accessTokenProp: 'LINE_CHANNEL_ACCESS_TOKEN_KIKUMI' },
-];
-
-// ==== リクエストのwebhook_tokenパラメータから、どのチャネル宛かを判定する ====
-// 検証用チャネル(DEFAULT)のみ、LINE_WEBHOOK_TOKEN未設定時は既存の後方互換動作
-// (トークン指定なしでも受理する)を維持する。新設の4チャネルは、対応するトークンが
-// 設定されていて、かつ一致した場合のみそのチャネルとして扱う(誤って別チャネル宛の
-// リクエストを検証用チャネルとして処理してしまわないようにするため)。
-function resolveLineChannel_(props, givenToken) {
-  for (let i = 0; i < LINE_CHANNELS_.length; i++) {
-    const channel = LINE_CHANNELS_[i];
-    const requiredToken = props.getProperty(channel.webhookTokenProp);
-    if (requiredToken && givenToken === requiredToken) return channel;
-  }
-  const defaultChannel = LINE_CHANNELS_[0];
-  if (!props.getProperty(defaultChannel.webhookTokenProp)) return defaultChannel;
-  return null;
-}
+// (Webhookを受け付けるチャネルの一覧 LINE_CHANNELS_ と resolveLineChannel_ は LineRouter.gs に移設)
 
 /**
  * 5チャネル分(検証用+配信先4人分)の当月メッセージ消費数をログに出す(項目G)。
@@ -208,35 +188,22 @@ function checkLineQuota() {
   logLineChannelQuotaConsumption_();
 }
 
-// ==== LINE Webhookのエントリーポイント(友だち追加後のuserId自動登録) ====
-function doPost(e) {
-  const props = PropertiesService.getScriptProperties();
-  const givenToken = e.parameter && e.parameter.webhook_token;
-  const channel = resolveLineChannel_(props, givenToken);
-  if (!channel) {
-    Logger.log('Webhookトークンがどのチャネルとも一致しないため無視しました。');
-    return ContentService.createTextOutput('ignored');
-  }
-
-  let body;
-  try {
-    body = JSON.parse(e.postData.contents);
-  } catch (err) {
-    Logger.log('Webhookボディの解析に失敗: ' + err.message);
-    return ContentService.createTextOutput('ok');
-  }
-
-  const channelAccessToken = props.getProperty(channel.accessTokenProp) || '';
-  (body.events || []).forEach(function (event) {
-    try {
-      handleLineWebhookEvent_(event, props, channelAccessToken);
-    } catch (err) {
-      Logger.log('Webhookイベント処理でエラー(' + channel.label + '): ' + err.message);
-    }
-  });
-
-  return ContentService.createTextOutput('ok');
-}
+// ==== LINE受付窓口(LineRouter.gs)への登録 ====
+// 友だち追加(follow)とテキストメッセージを担当する。登録用キーワード以外のテキストにも案内を返す
+// 「受け皿」の役割なので、priorityは大きめ(後ろの順番)にしている。画像などは担当しない(falseを返す)。
+var LINE_FEATURE_HANDLERS_ = (typeof LINE_FEATURE_HANDLERS_ !== 'undefined' && LINE_FEATURE_HANDLERS_) || [];
+LINE_FEATURE_HANDLERS_.push({
+  name: '天気配信:友だち登録',
+  priority: 100,
+  handle: function (ctx) {
+    const event = ctx.event;
+    const isTarget = event.type === 'follow' ||
+      (event.type === 'message' && event.message && event.message.type === 'text');
+    if (!isTarget) return false;
+    handleLineWebhookEvent_(event, ctx.props, ctx.accessToken);
+    return true;
+  },
+});
 
 // ==== Webhookのテキスト登録で使う、キーワード→(スクリプトプロパティ・返信文言)の対応表 ====
 const LINE_REGISTRATION_KEYWORDS_ = {
