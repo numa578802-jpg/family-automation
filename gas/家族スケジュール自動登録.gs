@@ -282,9 +282,13 @@ function checkNewFiles() {
   }
 
   // 同時に2つの取り込み処理が動かないようにする(定期実行と続き実行が重なった場合など)
-  if (!acquireFamilyScheduleLease_()) {
-    Logger.log('別の取り込み処理が実行中のため、今回は1分後の続き実行に回します。');
-    requestFamilyScheduleRunSoon_('実行中の処理と重なったため');
+  // (取り込めなかった場合も、ファイルはフォルダに残ったままなので消えることはなく、1分後に再試行する)
+  const lease = acquireFamilyScheduleLease_();
+  if (lease !== 'acquired') {
+    Logger.log(lease === 'lock_timeout'
+      ? '排他ロックを30秒待っても取得できなかった(天気配信の処理と重なった可能性)ため、1分後に再試行します。'
+      : '別の取り込み処理が実行中のため、1分後に再試行します。');
+    requestFamilyScheduleRunSoon_(lease === 'lock_timeout' ? 'ロック取得待ちのタイムアウト' : '実行中の処理と重なったため');
     return;
   }
 
@@ -447,15 +451,22 @@ function emailForFamilyName_(name, config) {
 const FAMILY_SCHEDULE_LEASE_PROP_ = 'FAMILY_SCHEDULE_RUNNING_UNTIL';
 const FAMILY_SCHEDULE_LEASE_MS_ = 7 * 60 * 1000; // GASの実行上限(6分)より少し長く
 
+// 戻り値: 'acquired'(取得できた) / 'busy'(別の取り込み処理が実行中) / 'lock_timeout'(ロック待ちで時間切れ)
 function acquireFamilyScheduleLease_() {
   const lock = LockService.getScriptLock();
-  if (!lock.tryLock(30 * 1000)) return false;
+  let locked = false;
+  try {
+    locked = lock.tryLock(30 * 1000);
+  } catch (e) {
+    locked = false;
+  }
+  if (!locked) return 'lock_timeout';
   try {
     const props = PropertiesService.getScriptProperties();
     const runningUntil = Number(props.getProperty(FAMILY_SCHEDULE_LEASE_PROP_) || 0);
-    if (runningUntil > Date.now()) return false;
+    if (runningUntil > Date.now()) return 'busy';
     props.setProperty(FAMILY_SCHEDULE_LEASE_PROP_, String(Date.now() + FAMILY_SCHEDULE_LEASE_MS_));
-    return true;
+    return 'acquired';
   } finally {
     lock.releaseLock();
   }

@@ -20,8 +20,14 @@
  *
  *   ・1行目は必ずこの形で書く(GASはファイルの読み込み順が決まっていないため、どのファイルが先に
  *     読まれても同じ一覧に登録されるようにする書き方)。const / let で宣言し直してはいけない。
- *   ・priority は小さいほど先に呼ばれる。画像など特定の種類だけを扱う機能は小さい値、
- *     「それ以外のテキストすべてに案内を返す」ような受け皿の機能は大きい値にする。
+ *   ・priority は小さいほど先に呼ばれる。必ず数値で明示する(未指定は警告のうえ最後尾扱い)。
+ *     画像など特定の種類だけを扱う機能は小さい値、「それ以外のテキストすべてに案内を返す」ような
+ *     受け皿の機能は大きい値にする。
+ *   ・現在の登録状況(追加時はここも更新する):
+ *       10  家族スケジュール:画像・PDF取り込み(ScheduleIntake_Line.gs) … 4つの個人チャネルの画像・ファイル・動画・音声
+ *       100 天気配信:友だち登録(WeatherNotify_Line.gs) … follow と、すべてのテキストメッセージ(受け皿)
+ *     テキストを扱う機能を新しく足す場合は、100より小さい値にしないとイベントが届かない。
+ *   ・返信は必ず ctx.reply() を使う(1イベント1回の制御を窓口で一元化するため)。
  *   ・handle(ctx) は、そのイベントを自分が処理したら true を返す。true が返った時点で、
  *     後ろの機能には渡さない(LINEの返信(reply)は1イベントにつき1回しかできないため)。
  *     自分の担当でなければ何もせず false を返す。
@@ -114,11 +120,24 @@ function doPost(e) {
 }
 
 // ==== 登録された機能ハンドラを priority の小さい順に並べて返す ====
+// priority は必ず数値で明示すること。未指定の場合は警告ログを出したうえで最後尾(1000)扱いにする。
+// 同じ priority どうしは name の順で並べ、ファイルの読み込み順に左右されないようにする。
+const LINE_ROUTER_DEFAULT_PRIORITY_ = 1000;
+
 function getSortedLineFeatureHandlers_() {
+  function priorityOf(h) {
+    if (typeof h.priority === 'number') return h.priority;
+    Logger.log('機能「' + h.name + '」の priority が未指定です。最後尾(' + LINE_ROUTER_DEFAULT_PRIORITY_ + ')として扱います。');
+    return LINE_ROUTER_DEFAULT_PRIORITY_;
+  }
   return LINE_FEATURE_HANDLERS_
     .filter(function (h) { return h && typeof h.handle === 'function'; })
-    .slice()
-    .sort(function (a, b) { return (a.priority || 100) - (b.priority || 100); });
+    .map(function (h) { return { handler: h, priority: priorityOf(h), name: String(h.name || '') }; })
+    .sort(function (a, b) {
+      if (a.priority !== b.priority) return a.priority - b.priority;
+      return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+    })
+    .map(function (x) { return x.handler; });
 }
 
 // ==== ハンドラに渡す ctx を作る(返信は1イベント1回までに制限) ====
