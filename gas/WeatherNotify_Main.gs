@@ -629,8 +629,54 @@ function scheduleHomewardRainAlertFor_(personKey, personLabel, targetDate, calen
   Logger.log(personLabel + ': 帰りの雨雲アラートを' + alertTime + 'に予約しました(帰り予定 ' + homeward.time + ')。');
 }
 
+/**
+ * 使い捨てトリガー用関数(runScheduled*_)の排他制御(2重送信対策)。
+ * ------------------------------------------------------------
+ * これらの関数はどれも「スクリプトプロパティを全件スキャン→期限が来たものを削除→
+ * 外部API呼び出し・送信」という同じ作りで、削除より前に別の実行が同じキーをまだ
+ * 見えてしまうと、2重送信になりうる(9/25にゆうき用・みつき用の帰りの雨雲アラートが
+ * 同時刻の予約となり、実際にみつき用が2通届いた実例で確認済み)。
+ * GASのLockServiceはスクリプト単位の1つのロックしか提供しないため(名前付きロックは無い)、
+ * runScheduled*_の6関数すべてが同じロックを共有する形になる。これらの関数どうしが
+ * ほぼ同時に発火した場合は互いに待ち合わせる(=直列に実行される)ことになるが、
+ * いずれも数秒〜数十秒程度で完了する処理のため、実用上の支障は無いと考えられる。
+ * ロックが取得できなかった場合は、2重送信より1回分の処理を見送ることを優先し、
+ * その回はエラーとしてログに残すだけで処理を行わない(スクリプトプロパティ自体は
+ * 削除されずに残るため、後日別の使い捨てトリガーが同種のプロパティを全件スキャンする
+ * 際に、まとめて拾われて送信される。ただし、その後しばらく同種のトリガーが
+ * 発火しない場合は、その分だけ送信が遅れる可能性がある)。
+ */
+const SCHEDULED_TASK_LOCK_WAIT_MS_ = 30 * 1000; // 仮値
+
+function runWithScheduledTaskLock_(taskLabel, fn) {
+  const lock = LockService.getScriptLock();
+  let acquired = false;
+  try {
+    acquired = lock.tryLock(SCHEDULED_TASK_LOCK_WAIT_MS_);
+  } catch (e) {
+    Logger.log(taskLabel + ': ロック取得中にエラーが発生したため、今回の処理は見送りました: ' + e.message);
+    return;
+  }
+  if (!acquired) {
+    Logger.log(taskLabel + ': ' + (SCHEDULED_TASK_LOCK_WAIT_MS_ / 1000) + '秒待っても排他ロックを取得できなかったため、' +
+      '2重送信を避けるため今回の処理は見送りました(別の使い捨てトリガーの処理と重なった可能性があります)。');
+    return;
+  }
+  try {
+    fn();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 // ==== 予約された帰りの雨雲アラートを、実際の時刻が来たら送信する(使い捨てトリガーから呼ばれる) ====
 function runScheduledHomewardAlerts_(e) {
+  runWithScheduledTaskLock_('帰りの雨雲アラート', function () {
+    runScheduledHomewardAlertsBody_(e);
+  });
+}
+
+function runScheduledHomewardAlertsBody_(e) {
   // 自分自身を呼び出したトリガーは、多重実行を防ぐため実行後すぐ削除する
   if (e && e.triggerUid) {
     ScriptApp.getProjectTriggers().forEach(function (trigger) {
@@ -735,6 +781,12 @@ function scheduleYukiStationNotices_(targetDate, calendarId, yukiSections) {
 
 // ==== 予約された「迎えの連絡+帰りの雨雲アラート」を、実際の時刻が来たら送信する(使い捨てトリガーから呼ばれる) ====
 function runScheduledYukiStationNotices_(e) {
+  runWithScheduledTaskLock_('ゆうきの帰りの案内', function () {
+    runScheduledYukiStationNoticesBody_(e);
+  });
+}
+
+function runScheduledYukiStationNoticesBody_(e) {
   if (e && e.triggerUid) {
     ScriptApp.getProjectTriggers().forEach(function (trigger) {
       if (trigger.getUniqueId() === e.triggerUid) {
@@ -846,6 +898,12 @@ function scheduleMitsukiLessonRainAlerts_(targetDate, calendarId, mitsukiSection
 
 // ==== 予約されたみつきさんの習い事帰りの雨雲アラートを、実際の時刻が来たら送信する(使い捨てトリガーから呼ばれる) ====
 function runScheduledMitsukiLessonRainAlerts_(e) {
+  runWithScheduledTaskLock_('お茶の帰りの雨雲アラート', function () {
+    runScheduledMitsukiLessonRainAlertsBody_(e);
+  });
+}
+
+function runScheduledMitsukiLessonRainAlertsBody_(e) {
   if (e && e.triggerUid) {
     ScriptApp.getProjectTriggers().forEach(function (trigger) {
       if (trigger.getUniqueId() === e.triggerUid) {
@@ -950,6 +1008,12 @@ function scheduleCarPickupAlerts_(targetDate, calendarId, departureNoticesByPers
 
 // ==== 予約された直前アラートを、実際の時刻が来たら送信する(使い捨てトリガーから呼ばれる) ====
 function runScheduledCarPickupAlerts_(e) {
+  runWithScheduledTaskLock_('直前アラート', function () {
+    runScheduledCarPickupAlertsBody_(e);
+  });
+}
+
+function runScheduledCarPickupAlertsBody_(e) {
   // 自分自身を呼び出したトリガーは、多重実行を防ぐため実行後すぐ削除する
   if (e && e.triggerUid) {
     ScriptApp.getProjectTriggers().forEach(function (trigger) {
@@ -1052,6 +1116,12 @@ function schedulePickupReminders_(targetDate, calendarId, departureNoticesByPers
 
 // ==== 予約された迎えの連絡リマインドを、実際の時刻が来たら送信する(使い捨てトリガーから呼ばれる) ====
 function runScheduledPickupReminders_(e) {
+  runWithScheduledTaskLock_('迎えの連絡リマインド', function () {
+    runScheduledPickupRemindersBody_(e);
+  });
+}
+
+function runScheduledPickupRemindersBody_(e) {
   // 自分自身を呼び出したトリガーは、多重実行を防ぐため実行後すぐ削除する
   if (e && e.triggerUid) {
     ScriptApp.getProjectTriggers().forEach(function (trigger) {
@@ -1152,6 +1222,12 @@ function scheduleBikeDepartureAlerts_(targetDate, calendarId, departureNoticesBy
 
 // ==== 予約された自転車の出発直前アラートを、実際の時刻が来たら送信する(使い捨てトリガーから呼ばれる) ====
 function runScheduledBikeDepartureAlerts_(e) {
+  runWithScheduledTaskLock_('自転車の出発直前アラート', function () {
+    runScheduledBikeDepartureAlertsBody_(e);
+  });
+}
+
+function runScheduledBikeDepartureAlertsBody_(e) {
   // 自分自身を呼び出したトリガーは、多重実行を防ぐため実行後すぐ削除する
   if (e && e.triggerUid) {
     ScriptApp.getProjectTriggers().forEach(function (trigger) {
