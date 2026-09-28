@@ -138,6 +138,15 @@ const CONTENT_RULES_ = [
   '最初の時間帯(例: 9:00〜12:00)を練習時間として使ってください。カッコ内の時間は片付けや会場予約の' +
   '終了時刻なので、予定のstart_time/end_timeには使わず、descriptionに' +
   '「会場は◯時まで予約」のように補足として記載してください。\n' +
+  '  - 「区分」列の「業後」(授業後)は、17:00として扱ってください。' +
+  '例: 「通常練習(業後〜17:15)」→ title="バドミントン部(通常練習)", start_time="17:00", end_time="17:15"。' +
+  '「業後」を理由に時刻を空欄(終日予定)にしないでください。\n' +
+  '  - 「区分」列に終わりの時刻が書かれていない場合(例: 「外練(業後〜)」)は、曜日で終わりの時刻を決めてください。' +
+  '火曜日・水曜日は end_time="17:15"、それ以外の曜日(月曜日・木曜日・金曜日)は end_time="18:00"。' +
+  '例: 木曜日の「外練(業後〜)」→ title="バドミントン部(外練)", start_time="17:00", end_time="18:00"。\n' +
+  '  - 「場所」列や「区分」列に「2年生のみ」「1年のみ」のような学年の指定がある場合、' +
+  '2年生が対象(「2年生のみ」など)の日は出力し、2年生が対象に含まれない日(「1年のみ」など)は出力しないでください。' +
+  '学年の指定が無い日は、通常どおり出力してください。\n' +
   '  - 「区分」列が「西三河選手権(複)」「新人戦」のような大会名の場合、時刻の無い終日予定として、' +
   'titleに大会名を含めてください(例: "バドミントン部(西三河選手権-複)")。「場所」列の内容があれば' +
   'locationに入れてください(「場所、種目未定」のように未確定の場合はlocationを空にしてください)。\n' +
@@ -554,7 +563,9 @@ function extractWithModelFallback_(file, config, uploaderName, state) {
       if (e.geminiKind === 'daily') {
         state.exhausted[m.id] = true;
         saveGeminiState_(state);
-        Logger.log('Gemini ' + m.label + ' が本日の上限に達しました。次のモデルに切り替えます。');
+        const nextModel = GEMINI_EXTRACT_MODELS_.slice(i + 1).filter(function (x) { return !state.exhausted[x.id]; })[0];
+        Logger.log('Gemini ' + m.label + ' が本日の上限に達しました。' +
+          (nextModel ? '次のモデル(' + nextModel.label + ')に切り替えます。' : '使える読み取りモデルが残っていません。'));
         continue;
       }
       throw e;
