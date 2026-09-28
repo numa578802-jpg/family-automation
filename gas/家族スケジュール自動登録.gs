@@ -952,7 +952,11 @@ function writeProcessLog_(parentFolder, fileName, events, errorMessage, modelLab
     lines.push('結果: ' + events.length + '件登録');
     events.forEach(function (ev) {
       const nameLabel = ev.name || '要確認';
-      lines.push('  ・[' + nameLabel + '] ' + ev.date + ' ' + (ev.start_time || '終日') + ' ' + ev.title);
+      // 時刻付きの予定は「開始〜終了」、複数日にまたがる終日予定は「終日(〜終了日)」の形で記録する
+      const timeLabel = ev.start_time
+        ? ev.start_time + (ev.end_time ? '〜' + ev.end_time : '')
+        : '終日' + (ev.multiDayEndDate ? '(〜' + ev.multiDayEndDate + ')' : '');
+      lines.push('  ・[' + nameLabel + '] ' + ev.date + ' ' + timeLabel + ' ' + ev.title);
     });
   }
   const entryText = lines.join('\n');
