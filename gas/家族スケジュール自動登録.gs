@@ -323,6 +323,8 @@ function processFilesWithinTimeLimit_(config) {
   const processedFolder = getOrCreateProcessedFolder_(folder);
   const pendingFolder = getOrCreatePendingFolder_(folder);
   const failedFileIds = {}; // この実行中にエラーになったファイル(同じ実行内で何度も再試行しない)
+  const geminiState = loadGeminiState_(); // Geminiの本日の利用状況(モデルごとの呼び出し回数・上限到達・ファイルごとの挑戦回数)
+  cleanupOldBusyRetryProps_();
 
   while (true) {
     const elapsed = Date.now() - startedAt;
@@ -347,12 +349,21 @@ function processFilesWithinTimeLimit_(config) {
     }
 
     // ② 登録待ちが無ければ、未処理の新規ファイルを1件抽出
-    const file = findNextScheduleFile_(folder, failedFileIds);
-    if (!file) return false; // すべて処理しきった
+    // すべての読み取りモデルが本日の上限に達している間は、Geminiを一切呼ばない(リセット後に自動で再開する)
+    if (allGeminiModelsExhausted_(geminiState)) {
+      if (findNextScheduleFile_(folder, failedFileIds, geminiState)) {
+        enterGeminiWaitMode_(geminiState, folder);
+        Logger.log('すべての読み取りモデルが本日の上限に達しているため、新しいファイルの読み取りはリセット後まで待ちます。');
+      }
+      return false;
+    }
+    const file = findNextScheduleFile_(folder, failedFileIds, geminiState);
+    if (!file) return false; // すべて処理しきった(本日の挑戦回数の上限に達したファイルは除く)
     if (elapsed > NEW_FILE_START_LIMIT_MS_) return true;
 
-    const ok = extractScheduleFile_(file, config, folder, processedFolder, pendingFolder, startedAt);
-    if (!ok) failedFileIds[file.getId()] = true;
+    const result = extractScheduleFile_(file, config, folder, processedFolder, pendingFolder, startedAt, geminiState);
+    if (result === 'waiting') return false;
+    if (result !== 'ok') failedFileIds[file.getId()] = true;
   }
 }
 
@@ -371,20 +382,28 @@ function findPendingJsonFile_(pendingFolder) {
 }
 
 // ==== フォルダ直下の未処理ファイル(PDF・画像)を1件返す(無ければ null) ====
-function findNextScheduleFile_(folder, failedFileIds) {
+// 本日の挑戦回数の上限(FILE_DAILY_ATTEMPT_MAX_)に達したファイルは、リセット後まで対象にしない
+function findNextScheduleFile_(folder, failedFileIds, geminiState) {
   const files = folder.getFiles();
   while (files.hasNext()) {
     const file = files.next();
     const mime = file.getMimeType();
     if (mime !== MimeType.PDF && mime.indexOf('image/') !== 0) continue;
     if (failedFileIds[file.getId()]) continue;
+    if (geminiState && (geminiState.fileAttempts[file.getId()] || 0) >= FILE_DAILY_ATTEMPT_MAX_) continue;
     return file;
   }
   return null;
 }
 
-// ==== 1ファイルを抽出して登録待ち(ペンディング)にする。成功で true、エラーで false ====
-function extractScheduleFile_(file, config, folder, processedFolder, pendingFolder, startedAt) {
+// ==== 1ファイルを抽出して登録待ち(ペンディング)にする ====
+// 戻り値: 'ok'(成功) / 'failed'(失敗。ファイルは残し後で再挑戦) / 'waiting'(全モデルが本日の上限に達した)
+function extractScheduleFile_(file, config, folder, processedFolder, pendingFolder, startedAt, geminiState) {
+  const fileId = file.getId();
+  // このファイルへの本日の挑戦回数を数える(失敗した呼び出しも無料枠の回数に数えられるため、1日の挑戦回数に上限を設ける)
+  const attempts = (geminiState.fileAttempts[fileId] || 0) + 1;
+  geminiState.fileAttempts[fileId] = attempts;
+  saveGeminiState_(geminiState);
   try {
     Logger.log('処理開始: ' + file.getName());
     const uploader = resolveUploader_(file, config);
@@ -394,7 +413,9 @@ function extractScheduleFile_(file, config, folder, processedFolder, pendingFold
     if (uploader.email) {
       Logger.log('アップロード者のメールアドレス: ' + uploader.email);
     }
-    const rawExtractedEvents = callGeminiApi_(file, config.apiKey, uploader.name);
+    const extracted = extractWithModelFallback_(file, config, uploader.name, geminiState);
+    const rawExtractedEvents = extracted.events;
+    Logger.log('読み取りモデル: ' + extracted.model.label + '(このファイルへの本日の挑戦 ' + attempts + '/' + FILE_DAILY_ATTEMPT_MAX_ + '回目)');
     const forcedName = guessForcedNameFromFilename_(file.getName(), config.familyFilenameMap);
     if (forcedName) {
       Logger.log('ファイル名から強制的に名前を確定: ' + forcedName);
@@ -410,6 +431,7 @@ function extractScheduleFile_(file, config, folder, processedFolder, pendingFold
         sourceFileName: file.getName(),
         remainingEvents: events,
         uploaderEmail: uploader.email,
+        extractModel: { label: extracted.model.label, lite: extracted.model.lite },
       };
       const pendingFile = pendingFolder.createFile(
         file.getName() + '.pending.json',
@@ -422,43 +444,205 @@ function extractScheduleFile_(file, config, folder, processedFolder, pendingFold
       }
     } else {
       Logger.log('予定を抽出できませんでした: ' + file.getName());
-      writeProcessLog_(folder, file.getName(), [], null);
+      writeProcessLog_(folder, file.getName(), [], null, extracted.model.label);
       file.moveTo(processedFolder);
     }
-    clearGeminiBusyRetryCount_(file.getId());
-    return true;
+    delete geminiState.fileAttempts[fileId];
+    saveGeminiState_(geminiState);
+    logGeminiCallSummary_(geminiState);
+    return 'ok';
   } catch (e) {
     Logger.log('エラー(' + file.getName() + '): ' + e.message);
-    writeProcessLog_(folder, file.getName(), [], e.message);
-    // エラーが出たファイルは残しておき、次回の定期実行でまた処理対象にする。
-    // Geminiの一時的な混雑(503/429)が原因の場合は、15分おきの定期実行を待たずに5分後の再試行も予約する
-    if (/Gemini APIエラー\((503|429)\)/.test(e.message)) {
-      scheduleGeminiBusyRetry_(file);
+    logGeminiCallSummary_(geminiState);
+    if (e.geminiKind === 'allExhausted') {
+      // ファイルのせいではないので、挑戦回数には数えない
+      geminiState.fileAttempts[fileId] = attempts - 1;
+      saveGeminiState_(geminiState);
+      enterGeminiWaitMode_(geminiState, folder);
+      return 'waiting';
     }
-    return false;
+    writeProcessLog_(folder, file.getName(), [], e.message);
+    // エラーが出たファイルは残しておき、後で再挑戦する(本日の挑戦回数の上限まで)
+    if (attempts >= FILE_DAILY_ATTEMPT_MAX_) {
+      Logger.log('このファイルは本日の挑戦回数の上限(' + FILE_DAILY_ATTEMPT_MAX_ + '回)に達したため、リセット後に再挑戦します: ' + file.getName());
+    } else if (e.geminiKind === 'busy') {
+      // Googleの一時的な混雑なら、15分おきの定期実行を待たずに5分後に再挑戦する
+      requestFamilyScheduleRunSoon_('Gemini混雑のため再試行(' + attempts + '/' + FILE_DAILY_ATTEMPT_MAX_ + '回目の挑戦が失敗)', GEMINI_BUSY_RETRY_DELAY_MS_);
+    }
+    return 'failed';
   }
 }
 
-// ==== Geminiの一時的な混雑で失敗したファイルを、5分後に再試行する(1ファイルにつき最大3回) ====
-// 3回を超えた後は、従来どおり15分おきの定期実行での再試行に任せる(再試行の連発を防ぐため)。
-const GEMINI_BUSY_RETRY_PROP_PREFIX_ = 'FAMILY_SCHEDULE_BUSY_RETRY_';
-const GEMINI_BUSY_RETRY_MAX_ = 3;
+// ==== 読み取りに使うGeminiモデル(1日の上限に達したら、この順に自動で切り替える) ====
+// 無料枠の1日の上限は「プロジェクトごと・モデルごと」に別々に数えられる。
+// (2026-09-28時点の上限: 3.5 Flash 20回 / 3.6 Flash 20回 / 3.5 Flash Lite 500回。日本時間16:00(冬時間は17:00)にリセット)
+const GEMINI_EXTRACT_MODELS_ = [
+  { id: 'gemini-3.5-flash', label: '3.5 Flash', lite: false }, // 読み取りルールはこのモデルで調整してきた(精度重視)
+  { id: 'gemini-3.6-flash', label: '3.6 Flash', lite: false },
+  { id: 'gemini-3.5-flash-lite', label: '3.5 Flash Lite', lite: true }, // 精度が下がる可能性があるため、通知メールで明示する
+];
+// 1ファイルへの1日の挑戦回数の上限(1回の挑戦でGeminiを最大2回呼ぶので、1ファイル最大6回)
+const FILE_DAILY_ATTEMPT_MAX_ = 3;
+// Googleの一時的な混雑で失敗したときの、次の挑戦までの待ち時間
 const GEMINI_BUSY_RETRY_DELAY_MS_ = 5 * 60 * 1000;
+// 本日の利用状況を保存するスクリプトプロパティ
+const GEMINI_STATE_PROP_ = 'FAMILY_SCHEDULE_GEMINI_STATE';
+// 全モデルが上限に達したとき、リセット時刻の何分後に取り込みを再開するか
+const GEMINI_RESET_BUFFER_MS_ = 5 * 60 * 1000;
+// リセット後の再開を予約したことを記録するスクリプトプロパティ(二重予約の防止)
+const GEMINI_RESUME_PROP_ = 'FAMILY_SCHEDULE_RESUME_AT';
 
-function scheduleGeminiBusyRetry_(file) {
-  const props = PropertiesService.getScriptProperties();
-  const key = GEMINI_BUSY_RETRY_PROP_PREFIX_ + file.getId();
-  const count = Number(props.getProperty(key) || 0) + 1;
-  props.setProperty(key, String(count));
-  if (count > GEMINI_BUSY_RETRY_MAX_) {
-    Logger.log('Gemini混雑による失敗が' + count + '回目のため、早めの再試行は行わず15分おきの定期実行に任せます: ' + file.getName());
-    return;
-  }
-  requestFamilyScheduleRunSoon_('Gemini混雑のため再試行(' + count + '/' + GEMINI_BUSY_RETRY_MAX_ + '回目)', GEMINI_BUSY_RETRY_DELAY_MS_);
+// ==== 無料枠の「1日」を表す日付(太平洋時間の日付。日本時間16:00/17:00に切り替わる) ====
+function geminiQuotaDay_(date) {
+  return Utilities.formatDate(date || new Date(), 'America/Los_Angeles', 'yyyy-MM-dd');
 }
 
-function clearGeminiBusyRetryCount_(fileId) {
-  PropertiesService.getScriptProperties().deleteProperty(GEMINI_BUSY_RETRY_PROP_PREFIX_ + fileId);
+// ==== 次のリセット時刻(太平洋時間の翌日0時) ====
+function nextGeminiResetTime_() {
+  const now = new Date();
+  const todayPt = geminiQuotaDay_(now);
+  const z = Utilities.formatDate(now, 'America/Los_Angeles', 'Z'); // 例: -0700
+  const offset = z.slice(0, 3) + ':' + z.slice(3);
+  const midnightToday = new Date(todayPt + 'T00:00:00' + offset);
+  return new Date(midnightToday.getTime() + 24 * 60 * 60 * 1000);
+}
+
+// ==== 本日の利用状況を読み込む(日付が変わっていたら、まっさらな状態から始める) ====
+function loadGeminiState_() {
+  const today = geminiQuotaDay_();
+  let state = null;
+  try {
+    state = JSON.parse(PropertiesService.getScriptProperties().getProperty(GEMINI_STATE_PROP_) || 'null');
+  } catch (e) {
+    state = null;
+  }
+  if (!state || state.day !== today) {
+    state = { day: today, calls: {}, exhausted: {}, fileAttempts: {}, waitUntil: 0, waitNotified: false };
+  }
+  return state;
+}
+
+function saveGeminiState_(state) {
+  PropertiesService.getScriptProperties().setProperty(GEMINI_STATE_PROP_, JSON.stringify(state));
+}
+
+// ==== 読み取りモデルがすべて本日の上限に達しているか ====
+function allGeminiModelsExhausted_(state) {
+  return GEMINI_EXTRACT_MODELS_.every(function (m) { return state.exhausted[m.id]; });
+}
+
+// ==== LINE受付(ScheduleIntake_Line.gs)から呼ぶ:全モデルが上限に達していれば再開予定時刻を、そうでなければ null を返す ====
+function getFamilyScheduleQuotaWait_() {
+  const state = loadGeminiState_();
+  if (!allGeminiModelsExhausted_(state)) return null;
+  return new Date(state.waitUntil || (nextGeminiResetTime_().getTime() + GEMINI_RESET_BUFFER_MS_));
+}
+
+// ==== モデルを順に試して読み取る。1日の上限に達したモデルは飛ばして次のモデルへ ====
+function extractWithModelFallback_(file, config, uploaderName, state) {
+  for (let i = 0; i < GEMINI_EXTRACT_MODELS_.length; i++) {
+    const m = GEMINI_EXTRACT_MODELS_[i];
+    if (state.exhausted[m.id]) continue;
+    try {
+      const events = callGeminiApi_(file, config.apiKey, uploaderName, m.id, function (modelId) {
+        state.calls[modelId] = (state.calls[modelId] || 0) + 1;
+      });
+      saveGeminiState_(state);
+      return { events: events, model: m };
+    } catch (e) {
+      saveGeminiState_(state);
+      if (e.geminiKind === 'daily') {
+        state.exhausted[m.id] = true;
+        saveGeminiState_(state);
+        Logger.log('Gemini ' + m.label + ' が本日の上限に達しました。次のモデルに切り替えます。');
+        continue;
+      }
+      throw e;
+    }
+  }
+  const err = new Error('すべての読み取りモデルが本日の上限に達しています');
+  err.geminiKind = 'allExhausted';
+  throw err;
+}
+
+// ==== 全モデルが上限に達したときの待機:リセット後の再開を予約し、一志に1回だけ知らせる ====
+function enterGeminiWaitMode_(state, folder) {
+  const resumeAt = nextGeminiResetTime_().getTime() + GEMINI_RESET_BUFFER_MS_;
+  state.waitUntil = resumeAt;
+  saveGeminiState_(state);
+  scheduleResumeAfterReset_(resumeAt);
+  if (!state.waitNotified) {
+    state.waitNotified = true;
+    saveGeminiState_(state);
+    try {
+      sendQuotaWaitEmail_(folder, resumeAt, state);
+    } catch (e) {
+      Logger.log('上限到達のお知らせメールの送信でエラー: ' + e.message);
+    }
+  }
+}
+
+function scheduleResumeAfterReset_(resumeAt) {
+  const props = PropertiesService.getScriptProperties();
+  if (Number(props.getProperty(GEMINI_RESUME_PROP_) || 0) === resumeAt) return; // 予約済み
+  ScriptApp.newTrigger('runFamilyScheduleAfterReset_').timeBased().at(new Date(resumeAt)).create();
+  props.setProperty(GEMINI_RESUME_PROP_, String(resumeAt));
+  Logger.log('リセット後の取り込み再開を予約しました: ' + Utilities.formatDate(new Date(resumeAt), 'Asia/Tokyo', 'M月d日 H:mm'));
+}
+
+// ==== scheduleResumeAfterReset_ が作った使い捨てトリガーから呼ばれる ====
+function runFamilyScheduleAfterReset_(e) {
+  if (e && e.triggerUid) {
+    ScriptApp.getProjectTriggers().forEach(function (trigger) {
+      if (trigger.getUniqueId() === e.triggerUid) {
+        ScriptApp.deleteTrigger(trigger);
+      }
+    });
+  }
+  PropertiesService.getScriptProperties().deleteProperty(GEMINI_RESUME_PROP_);
+  checkNewFiles();
+}
+
+// ==== 全モデルが上限に達したことを一志に知らせる(待機に入ったときに1回だけ) ====
+function sendQuotaWaitEmail_(folder, resumeAt, state) {
+  const config = getConfig_();
+  if (!config.notifyEmail) return;
+  let waitingCount = 0;
+  const files = folder.getFiles();
+  while (files.hasNext()) {
+    const mime = files.next().getMimeType();
+    if (mime === MimeType.PDF || mime.indexOf('image/') === 0) waitingCount++;
+  }
+  const resumeText = Utilities.formatDate(new Date(resumeAt), 'Asia/Tokyo', 'M月d日 H:mm');
+  MailApp.sendEmail({
+    to: config.notifyEmail,
+    subject: '【家族スケジュール自動登録】本日の読み取り回数の上限に達しました(' + resumeText + '以降に自動で再開)',
+    htmlBody:
+      '<p>Geminiの読み取りモデル(' + GEMINI_EXTRACT_MODELS_.map(function (m) { return m.label; }).join('・') +
+      ')が、すべて本日の無料枠の上限に達しました。</p>' +
+      '<p>未処理のファイルは ' + waitingCount + ' 件です。<b>' + resumeText + ' 以降に自動で取り込みを再開します。</b>' +
+      'ファイルはそのままで大丈夫です(別のフォルダへ移す必要はありません)。</p>' +
+      '<p>本日の読み取りでの呼び出し回数: ' + formatGeminiCallSummary_(state) + '</p>',
+  });
+}
+
+// ==== 本日のモデルごとの呼び出し回数(読み取り分。セルフチェック分は含まない) ====
+function formatGeminiCallSummary_(state) {
+  return GEMINI_EXTRACT_MODELS_.map(function (m) {
+    return m.label + ' ' + (state.calls[m.id] || 0) + '回' + (state.exhausted[m.id] ? '(上限到達)' : '');
+  }).join(' / ');
+}
+
+function logGeminiCallSummary_(state) {
+  Logger.log('本日のGemini呼び出し回数(太平洋時間 ' + state.day + '、読み取り分): ' + formatGeminiCallSummary_(state));
+}
+
+// ==== 旧方式(9/27版)の再試行カウンターが残っていれば削除する ====
+function cleanupOldBusyRetryProps_() {
+  const props = PropertiesService.getScriptProperties();
+  props.getKeys().forEach(function (key) {
+    if (key.indexOf('FAMILY_SCHEDULE_BUSY_RETRY_') === 0) props.deleteProperty(key);
+  });
 }
 
 // ==== アップロード者(誰の分か)を判定する ====
@@ -609,7 +793,8 @@ function processPendingBatch_(pendingFile, calendarId, processedFolder) {
     } catch (e) {
       Logger.log('元ファイルの移動でエラー(すでに移動済みの可能性): ' + e.message);
     }
-    writeProcessLog_(processedFolder.getParents().next(), data.sourceFileName, data.remainingEvents, null);
+    writeProcessLog_(processedFolder.getParents().next(), data.sourceFileName, data.remainingEvents, null,
+      data.extractModel ? data.extractModel.label : '');
     pendingFile.setTrashed(true);
     Logger.log('全件登録完了: ' + data.sourceFileName);
 
@@ -617,7 +802,7 @@ function processPendingBatch_(pendingFile, calendarId, processedFolder) {
     // 合計実行時間が6分の上限を超えてスクリプトごと強制終了する恐れがあるため、
     // 別トリガーの新しい実行(新しい6分の持ち時間)に切り出す
     try {
-      scheduleNotification_(data.sourceFileId, data.sourceFileName, data.uploaderEmail, skippedDuplicates);
+      scheduleNotification_(data.sourceFileId, data.sourceFileName, data.uploaderEmail, skippedDuplicates, data.extractModel || null);
     } catch (e) {
       Logger.log('通知メールの予約でエラー(処理自体は完了しています): ' + e.message);
     }
@@ -630,6 +815,7 @@ function processPendingBatch_(pendingFile, calendarId, processedFolder) {
         remainingEvents: rest,
         uploaderEmail: data.uploaderEmail,
         skippedDuplicates: skippedDuplicates,
+        extractModel: data.extractModel || null,
       })
     );
   }
@@ -638,7 +824,7 @@ function processPendingBatch_(pendingFile, calendarId, processedFolder) {
 
 // ==== セルフチェック+通知メール送信を、少し後に別実行で行うよう予約する ====
 // (抽出・登録と同じ実行内で行うと6分の実行時間上限に達する恐れがあるため分離)
-function scheduleNotification_(fileId, fileName, uploaderEmail, skippedDuplicates) {
+function scheduleNotification_(fileId, fileName, uploaderEmail, skippedDuplicates, extractModel) {
   const props = PropertiesService.getScriptProperties();
   props.setProperty(
     'PENDING_NOTIFY_' + fileId,
@@ -647,6 +833,7 @@ function scheduleNotification_(fileId, fileName, uploaderEmail, skippedDuplicate
       fileName: fileName,
       uploaderEmail: uploaderEmail,
       skippedDuplicates: skippedDuplicates || [],
+      extractModel: extractModel || null,
     })
   );
   // 10秒後に一度だけ実行されるトリガーを作成(新しい実行=新しい6分の持ち時間になる)
@@ -688,7 +875,7 @@ function runScheduledNotifications_(e) {
       if (sourceFile && config.apiKey) {
         checkReport = performSelfCheck_(sourceFile, config.apiKey, registeredLines, skippedLines);
       }
-      sendNotificationEmail_(config, data.fileName, registeredLines.length, checkReport, data.uploaderEmail, skippedLines);
+      sendNotificationEmail_(config, data.fileName, registeredLines.length, checkReport, data.uploaderEmail, skippedLines, data.extractModel || null);
     } catch (err) {
       Logger.log('遅延通知の処理でエラー: ' + err.message + ' (対象: ' + data.fileName + ')');
     }
@@ -706,7 +893,8 @@ function getOrCreatePendingFolder_(parentFolder) {
 }
 
 // ==== 処理ログをテキストファイルに追記(いつ・どのファイルから・何件・どんな予定を登録したか) ====
-function writeProcessLog_(parentFolder, fileName, events, errorMessage) {
+// modelLabel(省略可)を渡すと、読み取りに使ったGeminiモデルも記録する
+function writeProcessLog_(parentFolder, fileName, events, errorMessage, modelLabel) {
   const logFolder = getOrCreateLogFolder_(parentFolder);
   const logFileName = '処理ログ.txt';
 
@@ -716,6 +904,9 @@ function writeProcessLog_(parentFolder, fileName, events, errorMessage) {
   let lines = [];
   lines.push('====================================');
   lines.push('[' + timestamp + '] ファイル: ' + fileName);
+  if (modelLabel) {
+    lines.push('読み取りモデル: ' + modelLabel);
+  }
 
   if (errorMessage) {
     lines.push('結果: エラー - ' + errorMessage);
@@ -761,8 +952,10 @@ function getOrCreateProcessedFolder_(parentFolder) {
 }
 
 // ==== Gemini APIを呼び出してJSON形式で予定を抽出 ====
-function callGeminiApi_(file, apiKey, uploaderHint) {
-  const model = 'gemini-3.5-flash'; // オレンジ日付の見落とし防止のため精度重視モデルに変更
+// modelId: 使うモデル(省略時は gemini-3.5-flash)。onCall(省略可): APIを1回呼ぶたびに呼ばれる(呼び出し回数の記録用)
+// 失敗時に投げるエラーには geminiKind を付ける: 'busy'(一時的な混雑) / 'daily'(そのモデルの1日の上限) / 'other'
+function callGeminiApi_(file, apiKey, uploaderHint, modelId, onCall) {
+  const model = modelId || 'gemini-3.5-flash'; // オレンジ日付の見落とし防止のため精度重視モデルに変更
   const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + model +
     ':generateContent?key=' + apiKey;
 
@@ -866,11 +1059,14 @@ function callGeminiApi_(file, apiKey, uploaderHint) {
     ],
   };
 
-  // 一時的なサーバー混雑(503)やレート超過(429)は、間隔を空けて最大3回リトライする
-  const maxRetries = 5;
+  // 1回の実行の中での再試行は1回まで(最初の1回+再試行1回)。
+  // 無料枠では失敗した呼び出しも1日の回数に数えられるため、同じ実行の中で何度も試さない(2026-09-28の枠切れ対策)。
+  // 一時的な混雑(503、1分あたりの上限の429)だけ再試行し、1日の上限(429)やその他のエラーは再試行しない。
+  const maxAttempts = 2;
   let response;
   let responseCode;
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (onCall) onCall(model);
     response = UrlFetchApp.fetch(url, {
       method: 'post',
       contentType: 'application/json',
@@ -881,12 +1077,16 @@ function callGeminiApi_(file, apiKey, uploaderHint) {
 
     if (responseCode === 200) break;
 
-    if ((responseCode === 503 || responseCode === 429) && attempt < maxRetries) {
-      Logger.log('Gemini APIが一時的に混雑(' + responseCode + ')。' + attempt * 10 + '秒待って再試行します。');
-      Utilities.sleep(attempt * 10 * 1000);
-    } else {
-      throw new Error('Gemini APIエラー(' + responseCode + '): ' + response.getContentText());
+    const kind = classifyGeminiError_(responseCode, response.getContentText());
+    if (kind === 'busy' && attempt < maxAttempts) {
+      Logger.log('Gemini APIが一時的に混雑(' + responseCode + ')。10秒待って再試行します。(' + model + ')');
+      Utilities.sleep(10 * 1000);
+      continue;
     }
+    const err = new Error('Gemini APIエラー(' + responseCode + '): ' + response.getContentText());
+    err.geminiKind = kind;
+    err.geminiModel = model;
+    throw err;
   }
 
   const json = JSON.parse(response.getContentText());
@@ -903,6 +1103,18 @@ function callGeminiApi_(file, apiKey, uploaderHint) {
     rawEvents = [rawEvents];
   }
   return resolveHolidayChecks_(rawEvents);
+}
+
+// ==== Gemini APIのエラーの種類を判定する ====
+// 'busy': Google側の一時的な混雑(503)、または1分あたりの上限(429) → 時間を置けば直る
+// 'daily': そのモデルの1日の上限(429 RESOURCE_EXHAUSTED、quotaIdに「PerDay」を含む) → 次のモデルに切り替える
+// 'other': それ以外(400など)
+function classifyGeminiError_(responseCode, bodyText) {
+  if (responseCode === 503) return 'busy';
+  if (responseCode === 429) {
+    return /PerDay/.test(bodyText || '') ? 'daily' : 'busy';
+  }
+  return 'other';
 }
 
 // ==== 祝日一覧の文字列(YYYY-MM-DD 名称)から、日付→祝日名の対応表を作る ====
@@ -1424,8 +1636,10 @@ function dedupeEmails_(emails) {
 // ==== 取り込み完了の通知メールを送信(セルフチェック結果+確認/削除ボタン付き) ====
 // ・登録内容の「確認」は、アップロード本人+一志+きくみの3人が可能
 // ・登録内容の「削除」は、アップロード本人+一志の2人のみ可能(削除ボタンはこの2人にしか送らない)
-function sendNotificationEmail_(config, fileName, registeredCount, checkReport, uploaderEmail, skippedLines) {
+// extractModel(省略可): 読み取りに使ったモデル { label, lite }。簡易モデル(lite)の場合は件名・本文で明示する
+function sendNotificationEmail_(config, fileName, registeredCount, checkReport, uploaderEmail, skippedLines, extractModel) {
   const skipped = skippedLines || [];
+  const isLite = !!(extractModel && extractModel.lite);
   let webAppUrl = config.webAppUrl || null; // 手動設定を優先
   if (!webAppUrl) {
     try {
@@ -1442,7 +1656,7 @@ function sendNotificationEmail_(config, fileName, registeredCount, checkReport, 
   });
 
   const escapedReport = checkReport.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const subject = '【家族スケジュール自動登録】' + fileName + ' を取り込みました(' + registeredCount + '件' +
+  const subject = '【家族スケジュール自動登録】' + (isLite ? '【簡易モデルで読み取り】' : '') + fileName + ' を取り込みました(' + registeredCount + '件' +
     (skipped.length > 0 ? '、既存と同じ' + skipped.length + '件はスキップ' : '') + ')';
   const escapeHtml = function (text) {
     return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -1450,6 +1664,12 @@ function sendNotificationEmail_(config, fileName, registeredCount, checkReport, 
   const skippedHtml = skipped.length > 0
     ? '<p>次の ' + skipped.length + ' 件は、カレンダーに同じ予定が既にあったため登録をスキップしました(見落としではありません)。</p><ul>' +
       skipped.map(function (l) { return '<li>' + escapeHtml(l) + '</li>'; }).join('') + '</ul>'
+    : '';
+  const modelHtml = extractModel
+    ? (isLite
+      ? '<p style="color:#DB4437;"><b>通常のモデルが本日の上限に達したため、簡易モデル(' + escapeHtml(extractModel.label) +
+        ')で読み取りました。精度が低い可能性があります。登録内容を確認してください。</b></p>'
+      : '<p style="color:#888;">読み取りモデル: ' + escapeHtml(extractModel.label) + '</p>')
     : '';
 
   function buildHtmlBody_(includeDeleteButton) {
@@ -1473,6 +1693,7 @@ function sendNotificationEmail_(config, fileName, registeredCount, checkReport, 
 
     return (
       '<p>「' + fileName + '」から ' + registeredCount + ' 件の予定を登録しました。</p>' +
+      modelHtml +
       skippedHtml +
       '<p><b>AIによるセルフチェック結果:</b></p>' +
       '<pre style="white-space:pre-wrap;font-family:inherit;background:#f5f5f5;padding:10px;border-radius:4px;">' +
@@ -1664,4 +1885,48 @@ function resetProcessedFiles() {
     count++;
   }
   Logger.log(count + '件のファイルを「家族スケジュール」フォルダに戻しました。');
+}
+
+// ==== 【手動テスト用】Gemini 3.6 Flash での読み取りを試す(カレンダーには登録しない) ====
+// 使い方: 「家族スケジュール」フォルダの中に「モデル比較テスト」フォルダを作り、試したい書類のコピーを入れてから、
+// GASエディタでこの関数を実行する。結果は実行ログと「処理ログ.txt」に「[モデル比較テスト:3.6 Flash]」として記録される
+// (「◯件登録」と表示されるが、カレンダーには登録しない)。1枚につき、3.6 Flash の1日の枠を1〜2回使う。
+function testReadWithGemini36Flash() {
+  testReadWithModel_('gemini-3.6-flash', '3.6 Flash');
+}
+
+function testReadWithModel_(modelId, label) {
+  const config = getConfig_();
+  const folder = DriveApp.getFolderById(config.folderId);
+  const testFolders = folder.getFoldersByName('モデル比較テスト');
+  if (!testFolders.hasNext()) {
+    folder.createFolder('モデル比較テスト');
+    Logger.log('「モデル比較テスト」フォルダを作成しました。試したい書類のコピーを入れてから、もう一度実行してください。');
+    return;
+  }
+  const state = loadGeminiState_();
+  const files = testFolders.next().getFiles();
+  let count = 0;
+  while (files.hasNext()) {
+    const file = files.next();
+    const mime = file.getMimeType();
+    if (mime !== MimeType.PDF && mime.indexOf('image/') !== 0) continue;
+    if (count > 0) Utilities.sleep(13 * 1000); // 1分あたり5回の上限を超えないよう間隔を空ける
+    count++;
+    const logName = '[モデル比較テスト:' + label + '・カレンダー未登録] ' + file.getName();
+    try {
+      const uploader = resolveUploader_(file, config);
+      const events = callGeminiApi_(file, config.apiKey, uploader.name, modelId, function (id) {
+        state.calls[id] = (state.calls[id] || 0) + 1;
+      });
+      writeProcessLog_(folder, logName, mergeConsecutiveSameTitleEvents_(events), null, label);
+      Logger.log(logName + ': ' + events.length + '件を読み取りました。');
+    } catch (e) {
+      writeProcessLog_(folder, logName, [], e.message, label);
+      Logger.log(logName + ': エラー ' + e.message);
+    }
+    saveGeminiState_(state);
+  }
+  logGeminiCallSummary_(state);
+  Logger.log('テスト完了: ' + count + '件');
 }

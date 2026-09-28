@@ -20,6 +20,7 @@
  *
  * ■ 返信(すべてreplyのため、月200通の無料枠を消費しない)
  *   ・保存成功:「受け取りました」(複数枚をまとめて送った場合は最後の1枚にだけ返信)
+ *     Geminiの読み取りモデルがすべて本日の上限に達している間は、「◯時以降に登録します」と再開予定時刻を伝える
  *   ・保存失敗:再送またはDriveへの直接保存を案内
  *   ・動画・音声・画像/PDF以外のファイル:対応形式を案内
  *   ・検証用チャネル(崎家エージェント)は取り込み対象外(何もしない)
@@ -56,6 +57,12 @@ const SCHEDULE_INTAKE_FILE_TYPES_ = {
 
 const SCHEDULE_INTAKE_MSG_RECEIVED_ =
   'スケジュールを受け取りました。\n1〜2分後から順番にカレンダーへ登録します。登録が終わると確認メールが届きます。';
+// 全モデルが本日の上限に達しているときの返信(resumeAt: 再開予定時刻)
+function scheduleIntakeWaitingMessage_(resumeAt) {
+  return 'スケジュールを受け取りました。\n本日の読み取り回数の上限に達しているため、' +
+    Utilities.formatDate(resumeAt, 'Asia/Tokyo', 'M月d日 H:mm') +
+    '以降に自動でカレンダーへ登録します。登録が終わると確認メールが届きます。';
+}
 const SCHEDULE_INTAKE_MSG_FAILED_ =
   '保存に失敗しました。もう一度送るか、Googleドライブの「家族スケジュール」フォルダに直接保存してください。';
 const SCHEDULE_INTAKE_MSG_UNSUPPORTED_ =
@@ -82,11 +89,21 @@ function scheduleIntakeHandleLineEvent_(ctx) {
     return false; // テキスト・スタンプ等は担当外(天気配信の友だち登録などに回す)
   }
 
+  let resumeAt = null;
   try {
     const saved = scheduleIntakeSaveToDrive_(event, owner, ctx.accessToken);
     Logger.log('[' + ctx.channel.label + '] LINEから受信したファイルを保存しました: ' + saved.name +
       (saved.duplicate ? '(再送のため保存済みの分を使用)' : ''));
-    requestFamilyScheduleRunSoon_('LINEから受信');
+    // Geminiの読み取りモデルがすべて本日の上限に達している間は、取り込みの予約はせず(リセット後に自動再開される)、
+    // 返信で再開予定時刻を伝える
+    try {
+      resumeAt = getFamilyScheduleQuotaWait_();
+    } catch (e) {
+      resumeAt = null;
+    }
+    if (!resumeAt) {
+      requestFamilyScheduleRunSoon_('LINEから受信');
+    }
   } catch (err) {
     Logger.log('[' + ctx.channel.label + '] LINEからのファイル保存に失敗: ' + err.message);
     ctx.reply(SCHEDULE_INTAKE_MSG_FAILED_);
@@ -99,7 +116,8 @@ function scheduleIntakeHandleLineEvent_(ctx) {
     return true;
   }
   const countText = imageSet && imageSet.total > 1 ? '(' + imageSet.total + '枚)' : '';
-  ctx.reply(SCHEDULE_INTAKE_MSG_RECEIVED_.replace('受け取りました。', '受け取りました' + countText + '。'));
+  const receivedMessage = resumeAt ? scheduleIntakeWaitingMessage_(resumeAt) : SCHEDULE_INTAKE_MSG_RECEIVED_;
+  ctx.reply(receivedMessage.replace('受け取りました。', '受け取りました' + countText + '。'));
   return true;
 }
 
