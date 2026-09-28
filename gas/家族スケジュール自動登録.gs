@@ -547,15 +547,31 @@ function getFamilyScheduleQuotaWait_() {
   return new Date(state.waitUntil || (nextGeminiResetTime_().getTime() + GEMINI_RESET_BUFFER_MS_));
 }
 
-// ==== モデルを順に試して読み取る。1日の上限に達したモデルは飛ばして次のモデルへ ====
+// ==== モデルを切り替えながら読み取る ====
+// ・1日の上限に達したモデルは、その日は使わずに次のモデルへ(3.5 Flash → 3.6 Flash → 3.5 Flash Lite)
+// ・一時的な混雑のときは、同じFlash系のもう一方のモデルですぐ試す(使えるFlash系が1つだけなら、10秒後に同じモデルで試す)
+// ・混雑による試行は、1回の挑戦につき2回まで(無料枠は失敗した呼び出しも回数に数えられるため)
+// ・3.5 Flash Lite(精度が下がる可能性あり)は、Flash系がすべて1日の上限に達したときだけ使う(混雑では使わない)
+const GEMINI_BUSY_TRIES_PER_ATTEMPT_ = 2;
+
 function extractWithModelFallback_(file, config, uploaderName, state) {
-  for (let i = 0; i < GEMINI_EXTRACT_MODELS_.length; i++) {
-    const m = GEMINI_EXTRACT_MODELS_[i];
-    if (state.exhausted[m.id]) continue;
+  const onCall = function (modelId) {
+    state.calls[modelId] = (state.calls[modelId] || 0) + 1;
+  };
+  let busyTries = 0;
+  let busyErr = null;
+  while (busyTries < GEMINI_BUSY_TRIES_PER_ATTEMPT_) {
+    const available = GEMINI_EXTRACT_MODELS_.filter(function (x) { return !state.exhausted[x.id]; });
+    if (available.length === 0) break;
+    const flashModels = available.filter(function (x) { return !x.lite; });
+    const pool = flashModels.length > 0 ? flashModels : available;
+    const m = pool[busyTries % pool.length];
+    if (busyTries > 0 && pool.length === 1) {
+      Logger.log('10秒待って、' + m.label + ' でもう一度試します。');
+      Utilities.sleep(10 * 1000);
+    }
     try {
-      const events = callGeminiApi_(file, config.apiKey, uploaderName, m.id, function (modelId) {
-        state.calls[modelId] = (state.calls[modelId] || 0) + 1;
-      });
+      const events = callGeminiApi_(file, config.apiKey, uploaderName, m.id, onCall, 1);
       saveGeminiState_(state);
       return { events: events, model: m };
     } catch (e) {
@@ -563,17 +579,26 @@ function extractWithModelFallback_(file, config, uploaderName, state) {
       if (e.geminiKind === 'daily') {
         state.exhausted[m.id] = true;
         saveGeminiState_(state);
-        const nextModel = GEMINI_EXTRACT_MODELS_.slice(i + 1).filter(function (x) { return !state.exhausted[x.id]; })[0];
+        const nextModel = GEMINI_EXTRACT_MODELS_.filter(function (x) { return !state.exhausted[x.id]; })[0];
         Logger.log('Gemini ' + m.label + ' が本日の上限に達しました。' +
           (nextModel ? '次のモデル(' + nextModel.label + ')に切り替えます。' : '使える読み取りモデルが残っていません。'));
+        continue; // 上限切れは混雑の試行回数に数えない
+      }
+      if (e.geminiKind === 'busy') {
+        busyTries++;
+        busyErr = e;
+        Logger.log('Gemini ' + m.label + ' が一時的に混雑しています(' + busyTries + '/' + GEMINI_BUSY_TRIES_PER_ATTEMPT_ + '回目)。');
         continue;
       }
       throw e;
     }
   }
-  const err = new Error('すべての読み取りモデルが本日の上限に達しています');
-  err.geminiKind = 'allExhausted';
-  throw err;
+  if (allGeminiModelsExhausted_(state)) {
+    const err = new Error('すべての読み取りモデルが本日の上限に達しています');
+    err.geminiKind = 'allExhausted';
+    throw err;
+  }
+  throw busyErr;
 }
 
 // ==== 全モデルが上限に達したときの待機:リセット後の再開を予約し、一志に1回だけ知らせる ====
@@ -964,8 +989,9 @@ function getOrCreateProcessedFolder_(parentFolder) {
 
 // ==== Gemini APIを呼び出してJSON形式で予定を抽出 ====
 // modelId: 使うモデル(省略時は gemini-3.5-flash)。onCall(省略可): APIを1回呼ぶたびに呼ばれる(呼び出し回数の記録用)
+// maxAttemptsOverride(省略可): このモデルで試す回数(省略時は2回。モデル切り替えの中からは1回で呼ぶ)
 // 失敗時に投げるエラーには geminiKind を付ける: 'busy'(一時的な混雑) / 'daily'(そのモデルの1日の上限) / 'other'
-function callGeminiApi_(file, apiKey, uploaderHint, modelId, onCall) {
+function callGeminiApi_(file, apiKey, uploaderHint, modelId, onCall, maxAttemptsOverride) {
   const model = modelId || 'gemini-3.5-flash'; // オレンジ日付の見落とし防止のため精度重視モデルに変更
   const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + model +
     ':generateContent?key=' + apiKey;
@@ -1073,7 +1099,7 @@ function callGeminiApi_(file, apiKey, uploaderHint, modelId, onCall) {
   // 1回の実行の中での再試行は1回まで(最初の1回+再試行1回)。
   // 無料枠では失敗した呼び出しも1日の回数に数えられるため、同じ実行の中で何度も試さない(2026-09-28の枠切れ対策)。
   // 一時的な混雑(503、1分あたりの上限の429)だけ再試行し、1日の上限(429)やその他のエラーは再試行しない。
-  const maxAttempts = 2;
+  const maxAttempts = maxAttemptsOverride || 2;
   let response;
   let responseCode;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
